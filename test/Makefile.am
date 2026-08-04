@@ -1,17 +1,20 @@
-check_LTLIBRARIES = dummy_auditor.la
-check_PROGRAMS = dummy_app
+check_PROGRAMS = dummy_main
+check_LTLIBRARIES = libtest1_auditor.la libtest2_auditor.la
 
-dummy_auditor_la_SOURCES = dummy_auditor.cpp
-dummy_auditor_la_CPPFLAGS = -I$(top_srcdir)/include
-# Link against the utility library built in the root directory
-dummy_auditor_la_LIBADD = $(top_builddir)/libaudit_utils.la
-# -rpath is required here to force libtool to build a shared .so for a check_ target
-dummy_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /nowhere
+# The target executable for both tests
+dummy_main_SOURCES = dummy_main.cpp
 
-dummy_app_SOURCES = dummy_app.cpp
+# Test 1: Basic event forwarding
+libtest1_auditor_la_SOURCES = test1_auditor.cpp
+libtest1_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp
 
-TESTS = test_runner.sh
-EXTRA_DIST = test_runner.sh
+# Test 2: V2 rendezvous protocol
+libtest2_auditor_la_SOURCES = test2_auditor.cpp
+libtest2_auditor_la_CPPFLAGS = -I$(top_srcdir)/include
+# FIX: Use -L to point to the src directory, instead of a direct file dependency
+libtest2_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp
+libtest2_auditor_la_LIBADD = $(top_builddir)/libaudit_utils.la
 
-clean-local:
-	rm -f *.log *.trs
+# Run the test scripts
+TESTS = run_test1.sh run_test2.sh
+EXTRA_DIST = run_test1.sh run_test2.sh

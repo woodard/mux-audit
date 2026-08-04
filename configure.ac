@@ -15,7 +15,12 @@ CXXFLAGS="$CXXFLAGS -std=c++17"
 AM_PROG_AR
 
 # Initialize Libtool
-LT_INIT([dlopen])
+LT_INIT([shared disable-static dlopen])
+
+# Check for version 2 debugger rendezvous protocol (glibc >= 2.35)
+AC_CHECK_TYPES([struct r_debug_extended], [], [
+    AC_MSG_ERROR([glibc version 2.35 or newer with struct r_debug_extended is required!])
+], [[#include <link.h>]])
 
 # Output Makefiles
 AC_CONFIG_FILES([
