@@ -4,6 +4,29 @@
 #include <link.h>
 #include <cstdint>
 
+// Architecture-specific macros and types for LD_AUDIT
+#if defined(__x86_64__)
+    #define ARCH_LA_PLTENTER la_x86_64_gnu_pltenter
+    #define ARCH_LA_PLTEXIT la_x86_64_gnu_pltexit
+    typedef La_x86_64_regs arch_la_regs;
+    typedef La_x86_64_retval arch_la_retval;
+    typedef Elf64_Sym arch_elf_sym;
+#elif defined(__aarch64__)
+    #define ARCH_LA_PLTENTER la_aarch64_gnu_pltenter
+    #define ARCH_LA_PLTEXIT la_aarch64_gnu_pltexit
+    typedef La_aarch64_regs arch_la_regs;
+    typedef La_aarch64_retval arch_la_retval;
+    typedef Elf64_Sym arch_elf_sym;
+#elif defined(__i386__)
+    #define ARCH_LA_PLTENTER la_i86_gnu_pltenter
+    #define ARCH_LA_PLTEXIT la_i86_gnu_pltexit
+    typedef La_i86_regs arch_la_regs;
+    typedef La_i86_retval arch_la_retval;
+    typedef Elf32_Sym arch_elf_sym;
+#else
+    #error "Unsupported architecture for LD_AUDIT multiplexing"
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
