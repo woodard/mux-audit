@@ -32,3 +32,6 @@ install-data-hook:
 
 uninstall-hook:
 	rm -f $(DESTDIR)$(man3dir)/am_get_destructors.3
+
+# Include the bundle script in the distribution tarball without installing it
+EXTRA_DIST = tools/bundle_project.py
