@@ -3,6 +3,7 @@
 
 #include <link.h>
 #include <cstdint>
+#include <vector>
 
 // -----------------------------------------------------------------------------
 // Architecture-Specific Conditional Compilation
@@ -99,5 +100,24 @@ void am_iterate_maps(void (*cb)(struct link_map*));
 #ifdef __cplusplus
 }
 #endif
+
+// Type definition for standard library constructor/destructor functions
+typedef void (*am_init_fini_fn_t)(void);
+
+/**
+ * @brief Retrieves all constructors (DT_INIT and DT_INIT_ARRAY) for a given loaded object.
+ * 
+ * @param map Pointer to the link_map structure of the loaded object.
+ * @return A vector of function pointers to the object's constructors.
+ */
+std::vector<am_init_fini_fn_t> am_get_constructors(struct link_map* map);
+
+/**
+ * @brief Retrieves all destructors (DT_FINI and DT_FINI_ARRAY) for a given loaded object.
+ * 
+ * @param map Pointer to the link_map structure of the loaded object.
+ * @return A vector of function pointers to the object's destructors.
+ */
+std::vector<am_init_fini_fn_t> am_get_destructors(struct link_map* map);
 
 #endif // AUDIT_MULTIPLEXER_H

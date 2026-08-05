@@ -1,0 +1,27 @@
+.TH AM_GET_CONSTRUCTORS 3 "August 2026" "Audit Multiplexer" "Library Functions Manual"
+.SH NAME
+am_get_constructors, am_get_destructors \- retrieve shared object initialization and finalization functions
+.SH SYNOPSIS
+.nf
+\fB#include <audit_multiplexer.h>\fR
+
+\fBstd::vector<am_init_fini_fn_t> am_get_constructors(struct link_map *\fImap\fB);\fR
+\fBstd::vector<am_init_fini_fn_t> am_get_destructors(struct link_map *\fImap\fB);\fR
+.fi
+.SH DESCRIPTION
+The
+.BR am_get_constructors ()
+and
+.BR am_get_destructors ()
+functions inspect the dynamic section of a loaded shared object (represented by its \fIlink_map\fR) to locate its initialization (constructor) and finalization (destructor) functions. 
+.PP
+These utility functions are primarily intended for use within the
+.BR la_objopen (3)
+hook of an audit library. Because the dynamic linker loads objects sequentially, an auditor may need to manually execute an object's constructors in its own context or a sandbox environment before the library is fully exposed to the host application.
+.PP
+The functions inspect the \fBDT_INIT\fR and \fBDT_INIT_ARRAY\fR (or \fBDT_FINI\fR and \fBDT_FINI_ARRAY\fR) tags within the ELF dynamic section and adjust the parsed addresses using the load bias (\fIl_addr\fR) of the \fIlink_map\fR.
+.SH RETURN VALUE
+Both functions return a \fBstd::vector\fR of function pointers of type \fBam_init_fini_fn_t\fR. If the object has no constructors or destructors, or if the \fImap\fR pointer is invalid, an empty vector is returned.
+.SH SEE ALSO
+.BR rtld-audit (7),
+.BR dlinfo (3)
