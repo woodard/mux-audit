@@ -16,5 +16,5 @@ libaudit_utils_la_CPPFLAGS = -I$(top_srcdir)/include
 # Setup the multiplexer module
 audit_multiplexer_la_SOURCES = src/audit_multiplexer.cpp
 audit_multiplexer_la_CPPFLAGS = -I$(top_srcdir)/include
-audit_multiplexer_la_LDFLAGS = -module -avoid-version -shared
+audit_multiplexer_la_LDFLAGS = -module -avoid-version -shared -Wl,-z,now
 audit_multiplexer_la_LIBADD = libaudit_utils.la -ldl

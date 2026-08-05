@@ -18,9 +18,10 @@ AM_PROG_AR
 LT_INIT([shared disable-static dlopen])
 
 # Check for version 2 debugger rendezvous protocol (glibc >= 2.35)
-AC_CHECK_TYPES([struct r_debug_extended], [], [
-    AC_MSG_ERROR([glibc version 2.35 or newer with struct r_debug_extended is required!])
-], [[#include <link.h>]])
+AC_CHECK_TYPE([struct r_debug_extended],
+              [AC_DEFINE([HAVE_STRUCT_R_DEBUG_EXTENDED], [1], [Define if struct r_debug_extended exists])],
+              [AC_MSG_ERROR([glibc is too old: struct r_debug_extended not found in <link.h>. A newer glibc with multi-namespace support is strictly required.])],
+              [[#include <link.h>]])
 
 # Output Makefiles
 AC_CONFIG_FILES([
