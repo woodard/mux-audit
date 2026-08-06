@@ -4,11 +4,31 @@
 #include <cstdio>
 #include <elf.h>
 #include <cstddef>
+#include <unordered_map>
+#include <shared_mutex>
+#include <mutex>
+
+// Stateful maps for namespace tracking
+static std::unordered_map<Lmid_t, uintptr_t*> g_lmid_to_ns_cookie;
+static std::unordered_map<uintptr_t*, uintptr_t*> g_obj_to_ns_cookie;
+
+// Note on Thread Safety:
+// While the glibc dynamic linker (ld.so) strictly serializes object
+// loading and unloading (meaning la_objopen and la_objclose will
+// never run concurrently), a shared mutex is still mandatory. This
+// protects against catastrophic map rehashing if a thread calls
+// dlopen() (triggering a write via la_objopen) at the exact same time
+// another thread executes a PLT intercept (triggering a read via
+// la_pltenter), or if a sub-auditor queries the map from a background
+// thread.
+static std::shared_mutex g_cookie_map_mutex;
 
 extern "C" {
 
 struct link_map* la_cookie_to_link_map(uintptr_t* cookie) {
-    return reinterpret_cast<struct link_map*>(cookie);
+    if (!cookie) return nullptr;
+    // Dereference to get the stored address, then cast
+    return reinterpret_cast<struct link_map*>(*cookie);
 }
 
 void am_iterate_maps(void (*cb)(struct link_map*)) {
@@ -39,6 +59,49 @@ void am_iterate_maps(void (*cb)(struct link_map*)) {
         // Move to the next namespace
         ext_debug = ext_debug->r_next;
     }
+}
+
+void am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie) {
+    std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
+    
+    // The first object we see for a given LMID is the namespace head
+    if (g_lmid_to_ns_cookie.find(lmid) == g_lmid_to_ns_cookie.end()) {
+        g_lmid_to_ns_cookie[lmid] = cookie; 
+    }
+    
+    // Map this object's cookie to its namespace head cookie
+    g_obj_to_ns_cookie[cookie] = g_lmid_to_ns_cookie[lmid];
+}
+
+void am_untrack_ns_cookie(uintptr_t* cookie) {
+    std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
+    
+    auto it = g_obj_to_ns_cookie.find(cookie);
+    if (it != g_obj_to_ns_cookie.end()) {
+        uintptr_t* ns_cookie = it->second;
+        g_obj_to_ns_cookie.erase(it);
+
+        // If the closing object IS the namespace head, clean up the LMID map
+        if (ns_cookie == cookie) {
+            for (auto ns_it = g_lmid_to_ns_cookie.begin(); ns_it != g_lmid_to_ns_cookie.end(); ++ns_it) {
+                if (ns_it->second == cookie) {
+                    g_lmid_to_ns_cookie.erase(ns_it);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+uintptr_t* la_obj_cookie_to_ns_cookie(uintptr_t* cookie) {
+    std::shared_lock<std::shared_mutex> lock(g_cookie_map_mutex);
+    
+    auto it = g_obj_to_ns_cookie.find(cookie);
+    if (it != g_obj_to_ns_cookie.end()) {
+        return it->second;
+    }
+    
+    return nullptr;
 }
 
 } // extern "C"

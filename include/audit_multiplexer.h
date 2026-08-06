@@ -94,9 +94,23 @@ extern "C" {
 // Converts the cookie returned by la_objopen into a link_map pointer
 struct link_map* la_cookie_to_link_map(uintptr_t* cookie);
 
+/**
+ * @brief Retrieves the namespace cookie associated with a specific object's cookie.
+ * 
+ * @param cookie The cookie of any object loaded in the namespace.
+ * @return The uintptr_t* cookie representing the namespace head, or nullptr if unknown.
+ */
+uintptr_t* la_obj_cookie_to_ns_cookie(uintptr_t* cookie);
+
 // Allows sub-auditors to iterate through all known link_maps across all namespaces
 void am_iterate_maps(void (*cb)(struct link_map*));
 
+// Statefully tracks object cookies to their namespace head cookies
+void am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie);
+
+// Cleans up the namespace cookie tracking during object unloading
+void am_untrack_ns_cookie(uintptr_t* cookie);
+  
 #ifdef __cplusplus
 }
 #endif

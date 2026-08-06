@@ -263,6 +263,9 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
     am_register_map(map);
 
+    // Register the cookie to its namespace
+    am_track_ns_cookie(lmid, cookie);
+
     unsigned int overall_flags = 0;
 
     for (auto& aud_ptr : get_auditors()) {
@@ -323,7 +326,10 @@ void la_activity(uintptr_t* cookie, unsigned int flag) {
 }
 
 unsigned int la_objclose(uintptr_t* cookie) {
-    unsigned int ret = 0;
+  // Untrack the cookie before it is destroyed
+  am_untrack_ns_cookie(cookie);
+
+  unsigned int ret = 0;
     for (auto& aud_ptr : get_auditors()) {
         auto& aud = *aud_ptr;
         if (aud.objclose) ret = aud.objclose(cookie);

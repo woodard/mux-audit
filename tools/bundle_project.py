@@ -5,7 +5,7 @@ import argparse
 # --- CONFIGURATION ---
 # Directories to completely ignore by name (build artifacts, git, autotools cache)
 IGNORE_DIR_NAMES = {
-    '.git', '.svn', '.deps', '.libs', 'autom4te.cache', 
+    '.git', '.svn', '.deps', '.libs', 'autom4te.cache', 'build-aux', 'm4'
     'build', 'target', 'bin', 'obj', 'node_modules', 'venv'
 }
 
