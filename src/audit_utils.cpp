@@ -14,6 +14,9 @@ static std::unordered_map<Lmid_t, uintptr_t*> g_lmid_to_ns_cookie;
 static std::unordered_map<uintptr_t*, uintptr_t*> g_obj_to_ns_cookie;
 static std::unordered_set<uintptr_t*> g_ns_deleting_set;
 
+// Track the number of objects currently residing in each namespace
+static std::unordered_map<uintptr_t*, size_t> g_ns_refcount;
+
 // Note on Thread Safety:
 // While the glibc dynamic linker (ld.so) strictly serializes object
 // loading and unloading (meaning la_objopen and la_objclose will
@@ -46,7 +49,7 @@ void am_iterate_maps(void (*cb)(struct link_map*)) {
     // Traverse the linked list of namespaces
     while (ext_debug != nullptr) {
         struct link_map* lmap = ext_debug->base.r_map;
-        
+
         // Ensure we start at the absolute head of this namespace's link_map chain
         while (lmap && lmap->l_prev) {
             lmap = lmap->l_prev;
@@ -66,57 +69,78 @@ void am_iterate_maps(void (*cb)(struct link_map*)) {
 bool am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie) {
     std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
     bool is_new_ns = false;
-    
+
     // The first object we see for a given LMID is the namespace head
     if (g_lmid_to_ns_cookie.find(lmid) == g_lmid_to_ns_cookie.end()) {
-        g_lmid_to_ns_cookie[lmid] = cookie; 
+        g_lmid_to_ns_cookie[lmid] = cookie;
         is_new_ns = true;
     }
-    
+
+    uintptr_t* ns_cookie = g_lmid_to_ns_cookie[lmid];
+
     // Map this object's cookie to its namespace head cookie
-    g_obj_to_ns_cookie[cookie] = g_lmid_to_ns_cookie[lmid];
-    
+    g_obj_to_ns_cookie[cookie] = ns_cookie;
+
+    // Increment the reference count for this namespace
+    g_ns_refcount[ns_cookie]++;
+
     return is_new_ns;
 }
 
 void am_untrack_ns_cookie(uintptr_t* cookie) {
     std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
-    
+
     auto it = g_obj_to_ns_cookie.find(cookie);
     if (it != g_obj_to_ns_cookie.end()) {
         uintptr_t* ns_cookie = it->second;
         g_obj_to_ns_cookie.erase(it);
 
-        // If the closing object IS the namespace head, clean up the LMID map and deletion state
-        if (ns_cookie == cookie) {
-            for (auto ns_it = g_lmid_to_ns_cookie.begin(); ns_it != g_lmid_to_ns_cookie.end(); ++ns_it) {
-                if (ns_it->second == cookie) {
-                    g_lmid_to_ns_cookie.erase(ns_it);
-                    break;
+        // Decrement the reference count for this namespace
+        auto ref_it = g_ns_refcount.find(ns_cookie);
+        if (ref_it != g_ns_refcount.end()) {
+            ref_it->second--;
+
+            // If this was the absolute last object in the namespace, perform garbage collection
+            if (ref_it->second == 0) {
+                g_ns_refcount.erase(ref_it);
+                g_ns_deleting_set.erase(ns_cookie);
+
+                for (auto ns_it = g_lmid_to_ns_cookie.begin(); ns_it != g_lmid_to_ns_cookie.end(); ) {
+                    if (ns_it->second == ns_cookie) {
+                        ns_it = g_lmid_to_ns_cookie.erase(ns_it);
+                    } else {
+                        ++ns_it;
+                    }
                 }
             }
-            g_ns_deleting_set.erase(ns_cookie);
         }
     }
 }
 
 uintptr_t* la_obj_cookie_to_ns_cookie(uintptr_t* cookie) {
     std::shared_lock<std::shared_mutex> lock(g_cookie_map_mutex);
-    
+
     auto it = g_obj_to_ns_cookie.find(cookie);
     if (it != g_obj_to_ns_cookie.end()) {
         return it->second;
     }
-    
+
     return nullptr;
 }
 
 bool am_mark_ns_deleting(uintptr_t* ns_cookie) {
     std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
     if (!ns_cookie) return false;
-    
+
     // insert() returns a pair; the second element is 'true' if the insertion took place
     return g_ns_deleting_set.insert(ns_cookie).second;
+}
+
+void am_unmark_ns_deleting(uintptr_t* ns_cookie) {
+    std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
+    if (ns_cookie) {
+        g_ns_deleting_set.erase(ns_cookie);
+    }
 }
 
 } // extern "C"
@@ -159,7 +183,7 @@ static std::vector<am_init_fini_fn_t> am_get_init_fini(struct link_map* map, boo
     if (array_ptr && array_sz > 0) {
         size_t num_funcs = array_sz / sizeof(ElfW(Addr));
         ElfW(Addr)* array = reinterpret_cast<ElfW(Addr)*>(map->l_addr + array_ptr);
-        
+
         // Note: Destructors in DT_FINI_ARRAY are typically executed in reverse order by the dynamic linker
         for (size_t i = 0; i < num_funcs; ++i) {
             if (array[i] != 0 && array[i] != static_cast<ElfW(Addr)>(-1)) {

@@ -107,7 +107,7 @@ unsigned int la_version(unsigned int version) {
 
     // Prevent Duplicate Instances (handles DT_AUDIT and duplicate LD_AUDITs)
     if (getenv("AM_MUX_ACTIVE")) {
-        return 0; 
+        return 0;
     }
     setenv("AM_MUX_ACTIVE", "1", 1);
 
@@ -146,12 +146,6 @@ unsigned int la_version(unsigned int version) {
         }
     }
 
-    // Enforce Strict Binding to prevent ld.so re-entrancy panics during dlmopen
-    const char* env_bind_now = getenv("LD_BIND_NOW");
-    if (!env_bind_now || std::string(env_bind_now) != "1") {
-        requires_reexec = true;
-    }
-    
     // Re-exec if we are not in exclusive control
     if (requires_reexec) {
         std::cerr << "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing..." << std::endl;
@@ -184,11 +178,10 @@ unsigned int la_version(unsigned int version) {
 
         setenv("LD_AUDIT", my_path.c_str(), 1);
         setenv("LD_AUDIT2", new_ld_audit2.c_str(), 1);
-        setenv("LD_BIND_NOW", "1", 1);
-        
+
         // MUST unset the lock so the newly executed process can initialize the multiplexer
         unsetenv("AM_MUX_ACTIVE");
-	
+
         std::vector<char*> args = get_cmdline_args();
         execv("/proc/self/exe", args.data());
 
@@ -213,7 +206,7 @@ unsigned int la_version(unsigned int version) {
             if (handle) {
                 auto v_func = (unsigned int (*)(unsigned int))dlsym(handle, "la_version");
 
-                if (v_func && v_func(LAV_CURRENT + 100) == LAV_CURRENT + 100) {
+                if (v_func && v_func(LAV_CURRENT) == LAV_CURRENT) {
                     auto aud = std::make_unique<Auditor>();
                     aud->handle = handle;
                     aud->version = v_func;
@@ -296,7 +289,7 @@ void la_preinit(uintptr_t* cookie) {
         if (lm->l_ld) {
             Elf64_Dyn* dyn = (Elf64_Dyn*)lm->l_ld;
             const char* strtab = nullptr;
-            
+
             // First pass: locate the string table (DT_STRTAB)
             for (Elf64_Dyn* d = dyn; d->d_tag != DT_NULL; ++d) {
                 if (d->d_tag == DT_STRTAB) {
@@ -304,7 +297,7 @@ void la_preinit(uintptr_t* cookie) {
                     break;
                 }
             }
-            
+
             // Second pass: scan for foreign DT_AUDIT directives
             if (strtab) {
                 for (Elf64_Dyn* d = dyn; d->d_tag != DT_NULL; ++d) {
@@ -329,7 +322,27 @@ void la_preinit(uintptr_t* cookie) {
 }
 
 void la_activity(uintptr_t* cookie, unsigned int flag) {
-    for (auto& aud_ptr : get_auditors()) if (aud_ptr->activity) aud_ptr->activity(cookie, flag);
+    // Deduplicate LA_ACT_DELETE events
+    // glibc natively generates this event in _dl_fini and some
+    // dlclose paths.  am_mark_ns_deleting atomically checks and sets
+    // the deletion state.  If it returns false, the event was already
+    // broadcast (either natively or synthetically), so we drop the
+    // duplicate.
+    if (flag == LA_ACT_DELETE) {
+        if (!am_mark_ns_deleting(cookie)) {
+            return;
+        }
+    } else if (flag == LA_ACT_CONSISTENT) {
+        // The namespace has finished its modification phase.
+        // Clear the state so future deletions (like process exit) can trigger again.
+        am_unmark_ns_deleting(cookie);
+    }
+
+    for (auto& aud_ptr : get_auditors()) {
+        if (aud_ptr->activity) {
+            aud_ptr->activity(cookie, flag);
+        }
+    }
 }
 
 unsigned int la_objclose(uintptr_t* cookie) {

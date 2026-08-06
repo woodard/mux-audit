@@ -115,6 +115,9 @@ void am_untrack_ns_cookie(uintptr_t* cookie);
 // Atomically checks if a namespace has been marked for deletion, and marks it if not.
 // Returns true if the namespace transitioned from active to deleting.
 bool am_mark_ns_deleting(uintptr_t* ns_cookie);
+
+// Removes a namespace from the deletion tracking set when it returns to a consistent state.
+void am_unmark_ns_deleting(uintptr_t* ns_cookie);
   
 #ifdef __cplusplus
 }
