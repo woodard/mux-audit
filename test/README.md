@@ -47,6 +47,19 @@ The suite is integrated with the Autotools build system and can be executed auto
     *   Ensures the `AM_MUX_ACTIVE` lock successfully prevents feedback loops and double-loading.
     *   Validates that the multiplexer safely intercepts the rogue environment auditor from a `DT_AUDIT` context and successfully orchestrates the process re-execution.
 
+### Test 7: Activity State Ordering (`test_activity.sh`)
+
+**Purpose:**
+Validates that the multiplexer correctly synthesizes `LA_ACT_ADD` and `LA_ACT_DELETE` events. This compensates for a known `glibc` bug where the dynamic linker fails to issue these state transitions during the initial program startup sequence and when loading objects via `dlmopen`.
+
+**Components:**
+
+* **`test_activity_main.c`:** The driver program. It performs a sequence of `dlopen` and `dlclose` operations on dummy libraries to trigger dynamic linker events.
+* **`test_activity_auditor.c`:** A strict state-machine auditor plugin. It tracks the most recent `la_activity` flag and will forcefully abort the test (`exit(1)`) if `la_objopen` is called outside of an `LA_ACT_ADD` state, or if `la_objclose` is called outside of an `LA_ACT_DELETE` state.
+* **`libgood.c` & `libbad.c`:** Dummy shared libraries used as payloads. `libbad.so` is linked against `libgood.so` to test transitive dependency loading.
+
+**Success Criteria:**
+The test succeeds (returns exit code `0`) if and only if all object loads and unloads are perfectly bracketed by the correct `la_activity` state transitions, proving that the multiplexer is successfully bridging the gaps in `glibc`'s native reporting.
 ---
 
 ## Running the Tests

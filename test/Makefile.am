@@ -8,7 +8,7 @@ AM_TESTS_ENVIRONMENT = \
     LD_BIND_NOW=1; export LD_BIND_NOW; \
     LD_LIBRARY_PATH='$(builddir)/.libs:$(top_builddir)/.libs'; export LD_LIBRARY_PATH;
 
-check_PROGRAMS = dummy_main test4_main dt_audit_app
+check_PROGRAMS = dummy_main test4_main dt_audit_app test_activity_main
 check_LTLIBRARIES = \
     libtest1_auditor.la \
     libtest2_auditor.la \
@@ -18,7 +18,10 @@ check_LTLIBRARIES = \
     libtest4_auditor1.la \
     libtest4_auditor2.la \
     libtest4_payload.la \
-    libdummy_auditor.la
+    libdummy_auditor.la \
+    libgood.la \
+    libbad.la \
+    test_activity_auditor.la
 
 # The target executable for both tests
 dummy_main_SOURCES = dummy_main.cpp
@@ -70,6 +73,22 @@ libtest4_payload_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,
 libdummy_auditor_la_SOURCES = dummy_auditor.cpp
 libdummy_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
 
+# Activity Ordering Test: Main Target
+test_activity_main_SOURCES = test_activity_main.c
+test_activity_main_LDADD = -ldl
+
+# Activity Ordering Test: Dummy libraries
+libgood_la_SOURCES = libgood.c
+libgood_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
+
+libbad_la_SOURCES = libbad.c
+libbad_la_LIBADD = libgood.la
+libbad_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
+
+# Activity Ordering Test: Strict Auditor
+test_activity_auditor_la_SOURCES = test_activity_auditor.c
+test_activity_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
+
 # Run the test scripts
 TESTS = \
     run_test1.sh \
@@ -78,6 +97,7 @@ TESTS = \
     run_test4.sh \
     run_test5.sh \
     run_test6.sh \
-    run_test_dtaudit.sh
+    run_test_dtaudit.sh \
+    test_activity.sh
 
 EXTRA_DIST = $(TESTS) README.md

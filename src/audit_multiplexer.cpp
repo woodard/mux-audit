@@ -263,8 +263,15 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
     am_register_map(map);
 
-    // Register the cookie to its namespace
-    am_track_ns_cookie(lmid, cookie);
+    // Track the cookie and determine if it belongs to a new namespace
+    bool is_new_ns = am_track_ns_cookie(lmid, cookie);
+
+    // Inform auditors of namespace creation before processing the object
+    if (is_new_ns) {
+        for (auto& aud_ptr : get_auditors()) {
+            if (aud_ptr->activity) aud_ptr->activity(cookie, LA_ACT_ADD);
+        }
+    }
 
     unsigned int overall_flags = 0;
 
@@ -326,10 +333,18 @@ void la_activity(uintptr_t* cookie, unsigned int flag) {
 }
 
 unsigned int la_objclose(uintptr_t* cookie) {
-  // Untrack the cookie before it is destroyed
-  am_untrack_ns_cookie(cookie);
+    // Identify the namespace and synthesize LA_ACT_DELETE if not yet sent
+    uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(cookie);
+    if (ns_cookie && am_mark_ns_deleting(ns_cookie)) {
+        for (auto& aud_ptr : get_auditors()) {
+            if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_DELETE);
+        }
+    }
 
-  unsigned int ret = 0;
+    // Untrack MUST happen after we resolve the namespace cookie
+    am_untrack_ns_cookie(cookie);
+
+    unsigned int ret = 0;
     for (auto& aud_ptr : get_auditors()) {
         auto& aud = *aud_ptr;
         if (aud.objclose) ret = aud.objclose(cookie);

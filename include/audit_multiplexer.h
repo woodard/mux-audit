@@ -105,11 +105,16 @@ uintptr_t* la_obj_cookie_to_ns_cookie(uintptr_t* cookie);
 // Allows sub-auditors to iterate through all known link_maps across all namespaces
 void am_iterate_maps(void (*cb)(struct link_map*));
 
-// Statefully tracks object cookies to their namespace head cookies
-void am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie);
+// Statefully tracks object cookies to their namespace head cookies.
+// Returns true if this is a newly discovered namespace.
+bool am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie);
 
 // Cleans up the namespace cookie tracking during object unloading
 void am_untrack_ns_cookie(uintptr_t* cookie);
+
+// Atomically checks if a namespace has been marked for deletion, and marks it if not.
+// Returns true if the namespace transitioned from active to deleting.
+bool am_mark_ns_deleting(uintptr_t* ns_cookie);
   
 #ifdef __cplusplus
 }

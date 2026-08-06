@@ -5,12 +5,14 @@
 #include <elf.h>
 #include <cstddef>
 #include <unordered_map>
+#include <unordered_set>
 #include <shared_mutex>
 #include <mutex>
 
 // Stateful maps for namespace tracking
 static std::unordered_map<Lmid_t, uintptr_t*> g_lmid_to_ns_cookie;
 static std::unordered_map<uintptr_t*, uintptr_t*> g_obj_to_ns_cookie;
+static std::unordered_set<uintptr_t*> g_ns_deleting_set;
 
 // Note on Thread Safety:
 // While the glibc dynamic linker (ld.so) strictly serializes object
@@ -61,16 +63,20 @@ void am_iterate_maps(void (*cb)(struct link_map*)) {
     }
 }
 
-void am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie) {
+bool am_track_ns_cookie(Lmid_t lmid, uintptr_t* cookie) {
     std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
+    bool is_new_ns = false;
     
     // The first object we see for a given LMID is the namespace head
     if (g_lmid_to_ns_cookie.find(lmid) == g_lmid_to_ns_cookie.end()) {
         g_lmid_to_ns_cookie[lmid] = cookie; 
+        is_new_ns = true;
     }
     
     // Map this object's cookie to its namespace head cookie
     g_obj_to_ns_cookie[cookie] = g_lmid_to_ns_cookie[lmid];
+    
+    return is_new_ns;
 }
 
 void am_untrack_ns_cookie(uintptr_t* cookie) {
@@ -81,7 +87,7 @@ void am_untrack_ns_cookie(uintptr_t* cookie) {
         uintptr_t* ns_cookie = it->second;
         g_obj_to_ns_cookie.erase(it);
 
-        // If the closing object IS the namespace head, clean up the LMID map
+        // If the closing object IS the namespace head, clean up the LMID map and deletion state
         if (ns_cookie == cookie) {
             for (auto ns_it = g_lmid_to_ns_cookie.begin(); ns_it != g_lmid_to_ns_cookie.end(); ++ns_it) {
                 if (ns_it->second == cookie) {
@@ -89,6 +95,7 @@ void am_untrack_ns_cookie(uintptr_t* cookie) {
                     break;
                 }
             }
+            g_ns_deleting_set.erase(ns_cookie);
         }
     }
 }
@@ -102,6 +109,14 @@ uintptr_t* la_obj_cookie_to_ns_cookie(uintptr_t* cookie) {
     }
     
     return nullptr;
+}
+
+bool am_mark_ns_deleting(uintptr_t* ns_cookie) {
+    std::unique_lock<std::shared_mutex> lock(g_cookie_map_mutex);
+    if (!ns_cookie) return false;
+    
+    // insert() returns a pair; the second element is 'true' if the insertion took place
+    return g_ns_deleting_set.insert(ns_cookie).second;
 }
 
 } // extern "C"
