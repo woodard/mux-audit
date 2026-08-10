@@ -111,9 +111,11 @@ static std::mutex g_history_mutex;
 static std::unordered_map<struct link_map*, uintptr_t> g_synthesized_cookies;
 static std::mutex g_synth_cookie_mutex;
 
-// Track the namespace LMID of every cookie (native or synthetic) for self-reporting bypass
 static std::unordered_map<uintptr_t*, Lmid_t> g_cookie_to_lmid;
 static std::mutex g_cookie_lmid_mutex;
+
+// Structural offset calculated at runtime to robustly map uninitialized glibc cookies
+static size_t g_cookie_offset = 0;
 
 static void set_cookie_lmid(uintptr_t* cookie, Lmid_t lmid) {
     if (!cookie) return;
@@ -139,9 +141,17 @@ static uintptr_t* get_synth_cookie(struct link_map* map) {
     return &g_synthesized_cookies[map];
 }
 
+static struct link_map* get_lmap_from_cookie(uintptr_t* cookie) {
+    if (!cookie) return nullptr;
+    if (g_cookie_offset != 0) {
+        return reinterpret_cast<struct link_map*>(reinterpret_cast<char*>(cookie) - g_cookie_offset);
+    }
+    return la_cookie_to_link_map(cookie);
+}
+
 static uintptr_t* translate_cookie(uintptr_t* glibc_cookie) {
     if (!glibc_cookie) return nullptr;
-    struct link_map* lmap = la_cookie_to_link_map(glibc_cookie);
+    struct link_map* lmap = get_lmap_from_cookie(glibc_cookie);
     if (lmap) {
         std::lock_guard<std::mutex> lock(g_synth_cookie_mutex);
         auto it = g_synthesized_cookies.find(lmap);
@@ -308,8 +318,12 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
 }
 
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
+    if (g_cookie_offset == 0 && map && cookie) {
+        g_cookie_offset = reinterpret_cast<char*>(cookie) - reinterpret_cast<char*>(map);
+    }
+
     am_register_map(map);
-    set_cookie_lmid(cookie, lmid); // Track native lmid mapping
+    set_cookie_lmid(cookie, lmid); 
     
     bool is_new_ns = am_track_ns_cookie(lmid, cookie);
     uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(cookie);
@@ -342,7 +356,6 @@ unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
 }
 
 void la_preinit(uintptr_t* cookie) {
-    // 1. Safely extract PIE offsets for DT_AUDIT warnings
     struct link_map* lm = la_cookie_to_link_map(cookie);
     if (lm && lm->l_ld) {
         ElfW(Dyn)* dyn = (ElfW(Dyn)*)lm->l_ld;
@@ -373,7 +386,6 @@ void la_preinit(uintptr_t* cookie) {
         }
     }
 
-    // 2. Synthesize missing LM_ID_BASE events (e.g. audit_multiplexer.so itself) to sub-auditors
     struct link_map* base_map = _r_debug.r_map;
     while (base_map && base_map->l_prev) base_map = base_map->l_prev;
     
@@ -405,7 +417,7 @@ void la_preinit(uintptr_t* cookie) {
         base_map = base_map->l_next;
     }
 
-    // 3. Cross-pollinate sub-auditor namespaces (LM_ID_NEWLM) so they see each other.
+    // Cross-pollinate sub-auditor namespaces so they are visible to EACH OTHER
     for (size_t i = 0; i < get_auditors().size(); ++i) {
         auto& aud_ptr = get_auditors()[i];
         
@@ -441,14 +453,14 @@ void la_preinit(uintptr_t* cookie) {
                         announced_add = true;
                         
                         for (size_t j = 0; j < get_auditors().size(); ++j) {
-                            if (i == j) continue; // Auditor should NOT see itself
+                            if (i == j) continue; 
                             auto& other_aud = get_auditors()[j];
                             if (other_aud->activity) other_aud->activity(ns_cookie, LA_ACT_ADD);
                         }
                     }
 
                     for (size_t j = 0; j < get_auditors().size(); ++j) {
-                        if (i == j) continue; // Auditor should NOT see itself
+                        if (i == j) continue; 
                         auto& other_aud = get_auditors()[j];
                         if (other_aud->objsearch) other_aud->objsearch(iter->l_name, obj_cookie, LA_SER_AUDIT);
                         if (other_aud->objopen) {
@@ -493,7 +505,7 @@ void la_activity(uintptr_t* cookie, unsigned int flag) {
     for (auto& aud_ptr : get_auditors()) {
         Lmid_t aud_lmid = -1;
         dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
-        if (act_lmid != -1 && act_lmid == aud_lmid) continue; // Prevent self-reporting
+        if (act_lmid != -1 && act_lmid == aud_lmid) continue;
 
         if (aud_ptr->activity) {
             aud_ptr->activity(effective_cookie, flag);
@@ -510,7 +522,7 @@ unsigned int la_objclose(uintptr_t* cookie) {
         for (auto& aud_ptr : get_auditors()) {
             Lmid_t aud_lmid = -1;
             dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
-            if (close_lmid != -1 && close_lmid == aud_lmid) continue; // Prevent self-reporting
+            if (close_lmid != -1 && close_lmid == aud_lmid) continue;
 
             if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_DELETE);
         }
