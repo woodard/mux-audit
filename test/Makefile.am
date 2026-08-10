@@ -26,9 +26,9 @@ check_LTLIBRARIES = \
 # The target executable for both tests
 dummy_main_SOURCES = dummy_main.cpp
 
-# DT_AUDIT App (Compiled with the multiplexer in the ELF header)
+# DT_AUDIT App (Compiled with a rogue auditor in the ELF header)
 dt_audit_app_SOURCES = dt_audit_app.cpp
-dt_audit_app_LDFLAGS = -Wl,--audit="$(abs_top_builddir)/.libs/audit_multiplexer.so"
+dt_audit_app_LDFLAGS = -Wl,--audit="libdummy_auditor.so"
 
 # Test 1: Basic event forwarding
 libtest1_auditor_la_SOURCES = test1_auditor.cpp

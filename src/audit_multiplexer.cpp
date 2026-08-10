@@ -1,3 +1,22 @@
+/**
+ * ==============================================================================
+ * AUDIT MULTIPLEXER LIMITATIONS & ARCHITECTURAL DOCUMENTATION
+ * ==============================================================================
+ *
+ * 1. la_objsearch Semantics Limitation:
+ *    Because sub-auditors are loaded natively by glibc in `la_version`, glibc 
+ *    suppresses their initial startup events from their own perspective. We
+ *    manually replay history for `la_objsearch` and `la_objopen`. Consequently, 
+ *    if a sub-auditor attempts to modify the search path during this replay, 
+ *    the modification is IGNORED, as the object is already mapped.
+ * 
+ * 2. Lack of Auditor-to-Auditor PLT / Symbind Interception:
+ *    Glibc does not emit `la_symbind`, `la_pltenter`, or `la_pltexit` events for 
+ *    objects loaded into an auditor's namespace (LM_ID_NEWLM). As a result, the 
+ *    multiplexer cannot broadcast these events between sibling sub-auditors. 
+ * ==============================================================================
+ */
+
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
@@ -13,6 +32,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <memory>
 #include <cstdio>
@@ -20,10 +40,6 @@
 #include <fstream>
 #include <sstream>
 #include <elf.h>
-
-// -----------------------------------------------------------------------------
-// Core Tracking Structures
-// -----------------------------------------------------------------------------
 
 struct SymBindKey {
     uintptr_t* refcook;
@@ -46,7 +62,6 @@ struct SymBindKeyHash {
 struct Auditor {
     void* handle;
 
-    // Function Pointers
     unsigned int (*version)(unsigned int);
     char* (*objsearch)(const char*, uintptr_t*, unsigned int);
     unsigned int (*objopen)(struct link_map*, Lmid_t, uintptr_t*);
@@ -57,7 +72,6 @@ struct Auditor {
     Elf64_Addr (*pltenter)(Elf64_Sym*, unsigned int, uintptr_t*, uintptr_t*, ARCH_REGS*, unsigned int*, const char*, long int*);
     unsigned int (*pltexit)(Elf64_Sym*, unsigned int, uintptr_t*, uintptr_t*, const ARCH_REGS*, ARCH_RETVAL*, const char*);
 
-    // State Tracking
     std::shared_mutex obj_mutex;
     std::unordered_map<uintptr_t*, unsigned int> obj_flags;
 
@@ -86,6 +100,38 @@ static void am_register_map(struct link_map* map) {
     g_all_maps.push_back(map);
 }
 
+struct ObjectRecord {
+    struct link_map* lmap;
+    Lmid_t lmid;
+    uintptr_t* cookie;
+};
+static std::vector<ObjectRecord> g_history;
+static std::mutex g_history_mutex;
+
+static std::unordered_map<struct link_map*, uintptr_t> g_synthesized_cookies;
+static std::mutex g_synth_cookie_mutex;
+
+static uintptr_t* get_synth_cookie(struct link_map* map) {
+    std::lock_guard<std::mutex> lock(g_synth_cookie_mutex);
+    if (g_synthesized_cookies.find(map) == g_synthesized_cookies.end()) {
+        g_synthesized_cookies[map] = reinterpret_cast<uintptr_t>(map);
+    }
+    return &g_synthesized_cookies[map];
+}
+
+static uintptr_t* translate_cookie(uintptr_t* glibc_cookie) {
+    if (!glibc_cookie) return nullptr;
+    struct link_map* lmap = la_cookie_to_link_map(glibc_cookie);
+    if (lmap) {
+        std::lock_guard<std::mutex> lock(g_synth_cookie_mutex);
+        auto it = g_synthesized_cookies.find(lmap);
+        if (it != g_synthesized_cookies.end()) {
+            return &it->second;
+        }
+    }
+    return glibc_cookie;
+}
+
 static std::vector<char*> get_cmdline_args() {
     std::vector<char*> args;
     std::ifstream cmdline("/proc/self/cmdline");
@@ -101,13 +147,11 @@ static std::vector<char*> get_cmdline_args() {
 
 extern "C" {
 
-// 1. Initialization and Loading
 unsigned int la_version(unsigned int version) {
     if (version == 0) return version;
 
-    // Prevent Duplicate Instances (handles DT_AUDIT and duplicate LD_AUDITs)
     if (getenv("AM_MUX_ACTIVE")) {
-        return 0;
+        return 0; 
     }
     setenv("AM_MUX_ACTIVE", "1", 1);
 
@@ -115,15 +159,13 @@ unsigned int la_version(unsigned int version) {
     std::vector<std::string> prior_auditors;
     std::vector<std::string> subsequent_auditors;
 
-    // SAFELY get our own path without dlopen()
     Dl_info dlinfo_self;
     if (dladdr((void*)la_version, &dlinfo_self) == 0) {
-        std::cerr << "[audit_multiplexer] Error: dladdr failed." << std::endl;
+        fprintf(stderr, "[audit_multiplexer] Error: dladdr failed.\n");
         return LAV_CURRENT;
     }
     std::string my_path = dlinfo_self.dli_fname;
 
-    // Parse LD_AUDIT for subsequent/competing auditors securely
     const char* env_ld_audit = getenv("LD_AUDIT");
     if (env_ld_audit) {
         std::stringstream ss(env_ld_audit);
@@ -145,26 +187,24 @@ unsigned int la_version(unsigned int version) {
             }
         }
     }
-
-    // Re-exec if we are not in exclusive control
+    
     if (requires_reexec) {
-        std::cerr << "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing..." << std::endl;
+        fprintf(stderr, "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing...\n");
 
         std::string new_ld_audit2 = "";
         const char* current_ld_audit2 = getenv("LD_AUDIT2");
 
         for (const auto& aud : prior_auditors) {
-            std::cerr << "[audit_multiplexer] Moving prior auditor to LD_AUDIT2: " << aud << std::endl;
+            fprintf(stderr, "[audit_multiplexer] Moving prior auditor to LD_AUDIT2: %s\n", aud.c_str());
             new_ld_audit2 += aud + ":";
         }
 
         if (current_ld_audit2) {
-            new_ld_audit2 += current_ld_audit2;
-            new_ld_audit2 += ":";
+            new_ld_audit2 += std::string(current_ld_audit2) + ":";
         }
 
         for (const auto& aud : subsequent_auditors) {
-            std::cerr << "[audit_multiplexer] Moving subsequent LD_AUDIT entry to LD_AUDIT2: " << aud << std::endl;
+            fprintf(stderr, "[audit_multiplexer] Moving subsequent LD_AUDIT entry to LD_AUDIT2: %s\n", aud.c_str());
             new_ld_audit2 += aud + ":";
         }
 
@@ -172,24 +212,20 @@ unsigned int la_version(unsigned int version) {
             new_ld_audit2.pop_back();
         }
 
-        std::cerr << "[audit_multiplexer] Setting LD_AUDIT=" << my_path << std::endl;
-        std::cerr << "[audit_multiplexer] Setting LD_AUDIT2=" << new_ld_audit2 << std::endl;
-        std::cerr << "[audit_multiplexer] Executing /proc/self/exe..." << std::endl;
+        fprintf(stderr, "[audit_multiplexer] Setting LD_AUDIT=%s\n", my_path.c_str());
+        fprintf(stderr, "[audit_multiplexer] Setting LD_AUDIT2=%s\n", new_ld_audit2.c_str());
+        fprintf(stderr, "[audit_multiplexer] Executing /proc/self/exe...\n");
 
         setenv("LD_AUDIT", my_path.c_str(), 1);
         setenv("LD_AUDIT2", new_ld_audit2.c_str(), 1);
-
-        // MUST unset the lock so the newly executed process can initialize the multiplexer
         unsetenv("AM_MUX_ACTIVE");
-
+	
         std::vector<char*> args = get_cmdline_args();
         execv("/proc/self/exe", args.data());
-
         perror("execv failed");
         exit(EXIT_FAILURE);
     }
 
-    // Normal Initialization
     const char* ld_audit2 = getenv("LD_AUDIT2");
     if (!ld_audit2) return LAV_CURRENT;
 
@@ -234,7 +270,6 @@ unsigned int la_version(unsigned int version) {
     return LAV_CURRENT;
 }
 
-// 2. Search Path Chaining
 char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
     const char* current_name = name;
     unsigned int current_flag = flag;
@@ -252,22 +287,26 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
     return const_cast<char*>(current_name);
 }
 
-// 3. Object Open
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
     am_register_map(map);
-
-    // Track the cookie and determine if it belongs to a new namespace
     bool is_new_ns = am_track_ns_cookie(lmid, cookie);
 
-    // Inform auditors of namespace creation before processing the object
-    if (is_new_ns) {
-        for (auto& aud_ptr : get_auditors()) {
-            if (aud_ptr->activity) aud_ptr->activity(cookie, LA_ACT_ADD);
+    uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(cookie);
+
+    if (is_new_ns && ns_cookie) {
+        if (am_mark_ns_added(ns_cookie)) {
+            for (auto& aud_ptr : get_auditors()) {
+                if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_ADD);
+            }
         }
     }
 
-    unsigned int overall_flags = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_history_mutex);
+        g_history.push_back({map, lmid, cookie});
+    }
 
+    unsigned int overall_flags = 0;
     for (auto& aud_ptr : get_auditors()) {
         auto& aud = *aud_ptr;
         if (aud.objopen) {
@@ -282,92 +321,153 @@ unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
 }
 
 void la_preinit(uintptr_t* cookie) {
-    // Safely check the main executable's dynamic section for foreign DT_AUDIT tags
     struct r_debug* rdbg = &_r_debug;
-    if (rdbg && rdbg->r_map) {
+    if (rdbg && rdbg->r_map && rdbg->r_map->l_ld) {
         struct link_map* lm = rdbg->r_map;
-        if (lm->l_ld) {
-            Elf64_Dyn* dyn = (Elf64_Dyn*)lm->l_ld;
-            const char* strtab = nullptr;
-
-            // First pass: locate the string table (DT_STRTAB)
-            for (Elf64_Dyn* d = dyn; d->d_tag != DT_NULL; ++d) {
-                if (d->d_tag == DT_STRTAB) {
-                    strtab = (const char*)d->d_un.d_ptr;
-                    break;
-                }
+        ElfW(Dyn)* dyn = (ElfW(Dyn)*)lm->l_ld;
+        const char* strtab = nullptr;
+        
+        for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; ++d) {
+            if (d->d_tag == DT_STRTAB) {
+                ElfW(Addr) ptr = d->d_un.d_ptr;
+                if (lm->l_addr != 0 && ptr < lm->l_addr) ptr += lm->l_addr;
+                strtab = (const char*)ptr;
+                break;
             }
-
-            // Second pass: scan for foreign DT_AUDIT directives
-            if (strtab) {
-                for (Elf64_Dyn* d = dyn; d->d_tag != DT_NULL; ++d) {
-                    if (d->d_tag == DT_AUDIT) {
-                        const char* audit_lib = strtab + d->d_un.d_val;
-                        // If it's not us, issue a soft warning to stderr
-                        if (strstr(audit_lib, "audit_multiplexer") == nullptr) {
-                            std::cerr << "[audit_multiplexer] WARNING: Foreign DT_AUDIT directive detected: " << audit_lib << std::endl;
-                            std::cerr << "  This auditor will load normally but bypasses the multiplexer's control." << std::endl;
-                            std::cerr << "  Suggestion (Option A): Use patchelf to rewrite the executable:" << std::endl;
-                            std::cerr << "    patchelf --remove-audit " << audit_lib << " <executable>" << std::endl;
-                            std::cerr << "    patchelf --add-audit /path/to/audit_multiplexer.so <executable>" << std::endl;
-                        }
+        }
+        
+        if (strtab) {
+            for (ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; ++d) {
+                if (d->d_tag == DT_AUDIT || d->d_tag == 0x7ffffffb) {
+                    const char* audit_lib = strtab + d->d_un.d_val;
+                    if (strstr(audit_lib, "audit_multiplexer") == nullptr) {
+                        fprintf(stderr, "[audit_multiplexer] WARNING: Foreign DT_AUDIT directive detected: %s\n", audit_lib);
+                        fprintf(stderr, "  This auditor will load normally but bypasses the multiplexer's control.\n");
+                        fprintf(stderr, "  Suggestion (Option A): Use patchelf to rewrite the executable:\n");
+                        fprintf(stderr, "    patchelf --remove-audit %s <executable>\n", audit_lib);
+                        fprintf(stderr, "    patchelf --add-audit /path/to/audit_multiplexer.so <executable>\n");
                     }
                 }
             }
         }
     }
 
-    // Continue passing the event down the chain
+    std::unordered_set<uintptr_t*> subauditor_nscookies;
+    {
+        std::lock_guard<std::mutex> lock(g_history_mutex);
+        for (const auto& rec : g_history) {
+            if (rec.lmid != LM_ID_BASE) {
+                uintptr_t* ns = la_obj_cookie_to_ns_cookie(rec.cookie);
+                if (ns) subauditor_nscookies.insert(ns);
+            }
+        }
+    }
+
+    for (uintptr_t* ns_cookie : subauditor_nscookies) {
+        Lmid_t ns_lmid = -1;
+        {
+            std::lock_guard<std::mutex> lock(g_history_mutex);
+            for (const auto& rec : g_history) {
+                if (la_obj_cookie_to_ns_cookie(rec.cookie) == ns_cookie) {
+                    ns_lmid = rec.lmid;
+                    break;
+                }
+            }
+        }
+        
+        for (auto& aud_ptr : get_auditors()) {
+            Lmid_t aud_lmid = -1;
+            dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
+            if (ns_lmid != aud_lmid) {
+                if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_ADD);
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_history_mutex);
+            for (const auto& rec : g_history) {
+                if (la_obj_cookie_to_ns_cookie(rec.cookie) == ns_cookie) {
+                    for (auto& aud_ptr : get_auditors()) {
+                        Lmid_t aud_lmid = -1;
+                        dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
+                        if (ns_lmid != aud_lmid) {
+                            if (aud_ptr->objsearch) aud_ptr->objsearch(rec.lmap->l_name, rec.cookie, LA_SER_AUDIT);
+                            if (aud_ptr->objopen) {
+                                unsigned int sub_flags = aud_ptr->objopen(rec.lmap, rec.lmid, rec.cookie);
+                                std::unique_lock<std::shared_mutex> a_lock(aud_ptr->obj_mutex);
+                                aud_ptr->obj_flags[rec.cookie] = sub_flags;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for (auto& aud_ptr : get_auditors()) {
+            Lmid_t aud_lmid = -1;
+            dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
+            if (ns_lmid != aud_lmid) {
+                if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_CONSISTENT);
+            }
+        }
+        am_unmark_ns_added(ns_cookie);
+    }
+
     for (auto& aud_ptr : get_auditors()) if (aud_ptr->preinit) aud_ptr->preinit(cookie);
 }
 
 void la_activity(uintptr_t* cookie, unsigned int flag) {
-    // Deduplicate LA_ACT_DELETE events
-    // glibc natively generates this event in _dl_fini and some
-    // dlclose paths.  am_mark_ns_deleting atomically checks and sets
-    // the deletion state.  If it returns false, the event was already
-    // broadcast (either natively or synthetically), so we drop the
-    // duplicate.
-    if (flag == LA_ACT_DELETE) {
-        if (!am_mark_ns_deleting(cookie)) {
-            return;
-        }
+    uintptr_t* effective_cookie = translate_cookie(cookie);
+
+    if (flag == LA_ACT_ADD) {
+        if (!am_mark_ns_added(effective_cookie)) return;
+    } else if (flag == LA_ACT_DELETE) {
+        if (!am_mark_ns_deleting(effective_cookie)) return;
     } else if (flag == LA_ACT_CONSISTENT) {
-        // The namespace has finished its modification phase.
-        // Clear the state so future deletions (like process exit) can trigger again.
-        am_unmark_ns_deleting(cookie);
+        am_unmark_ns_deleting(effective_cookie);
+        am_unmark_ns_added(effective_cookie);
     }
 
     for (auto& aud_ptr : get_auditors()) {
         if (aud_ptr->activity) {
-            aud_ptr->activity(cookie, flag);
+            aud_ptr->activity(effective_cookie, flag);
         }
     }
-}
+}  
 
 unsigned int la_objclose(uintptr_t* cookie) {
-    // Identify the namespace and synthesize LA_ACT_DELETE if not yet sent
-    uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(cookie);
+    uintptr_t* effective_cookie = translate_cookie(cookie);
+    uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(effective_cookie);
+    
     if (ns_cookie && am_mark_ns_deleting(ns_cookie)) {
         for (auto& aud_ptr : get_auditors()) {
             if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_DELETE);
         }
     }
 
-    // Untrack MUST happen after we resolve the namespace cookie
-    am_untrack_ns_cookie(cookie);
+    am_untrack_ns_cookie(effective_cookie);
 
     unsigned int ret = 0;
     for (auto& aud_ptr : get_auditors()) {
         auto& aud = *aud_ptr;
-        if (aud.objclose) ret = aud.objclose(cookie);
-        std::unique_lock<std::shared_mutex> lock(aud.obj_mutex);
-        aud.obj_flags.erase(cookie);
+        bool should_close = false;
+        
+        {
+            std::unique_lock<std::shared_mutex> lock(aud.obj_mutex);
+            auto it = aud.obj_flags.find(effective_cookie);
+            if (it != aud.obj_flags.end()) {
+                should_close = true;
+                aud.obj_flags.erase(it);
+            }
+        }
+        
+        if (should_close && aud.objclose) {
+            ret = aud.objclose(effective_cookie);
+        }
     }
     return ret;
 }
 
-// 4. Symbol Binding and Address Chaining
 uintptr_t la_symbind64(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook,
                        uintptr_t* defcook, unsigned int* flags, const char* symname) {
 
@@ -375,7 +475,6 @@ uintptr_t la_symbind64(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook,
     uintptr_t current_addr = 0;
     bool has_alt_addr = false;
     unsigned int final_flags = *flags;
-
     bool any_called = false;
     bool all_nopltenter = true;
     bool all_nopltexit = true;
@@ -419,7 +518,6 @@ uintptr_t la_symbind64(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook,
     return has_alt_addr ? current_addr : current_sym.st_value;
 }
 
-// 5. PLT Enter Execution
 Elf64_Addr LA_PLTENTER_FUNC(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook,
                             uintptr_t* defcook, ARCH_REGS* regs,
                             unsigned int* flags, const char* symname, long int* framesizep) {
@@ -427,7 +525,6 @@ Elf64_Addr LA_PLTENTER_FUNC(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook
     Elf64_Sym current_sym = *sym;
     Elf64_Addr current_addr = 0;
     bool has_alt_addr = false;
-
     bool any_called = false;
     bool all_nopltenter = true;
     bool all_nopltexit = true;
@@ -439,17 +536,13 @@ Elf64_Addr LA_PLTENTER_FUNC(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook
         if (!aud.pltenter || !aud.wants_symbind(refcook, defcook)) continue;
 
         unsigned int current_sub_flags = *flags;
-
         {
             std::shared_lock<std::shared_mutex> lock(aud.sym_mutex);
             auto it = aud.sym_flags.find(key);
-            if (it != aud.sym_flags.end()) {
-                current_sub_flags = it->second;
-            }
+            if (it != aud.sym_flags.end()) current_sub_flags = it->second;
         }
 
         if (current_sub_flags & LA_SYMB_NOPLTENTER) continue;
-
         any_called = true;
 
         if (has_alt_addr) {
@@ -483,7 +576,6 @@ Elf64_Addr LA_PLTENTER_FUNC(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook
     return has_alt_addr ? current_addr : current_sym.st_value;
 }
 
-// 6. PLT Exit Execution
 unsigned int LA_PLTEXIT_FUNC(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcook,
                              uintptr_t* defcook, const ARCH_REGS* inregs,
                              ARCH_RETVAL* outregs, const char* symname) {
@@ -500,10 +592,8 @@ unsigned int LA_PLTEXIT_FUNC(Elf64_Sym* sym, unsigned int ndx, uintptr_t* refcoo
             auto it = aud.sym_flags.find(key);
             if (it != aud.sym_flags.end() && (it->second & LA_SYMB_NOPLTEXIT)) continue;
         }
-
         final_ret = aud.pltexit(sym, ndx, refcook, defcook, inregs, outregs, symname);
     }
-
     return final_ret;
 }
 
