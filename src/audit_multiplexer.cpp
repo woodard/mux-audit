@@ -214,11 +214,27 @@ unsigned int la_version(unsigned int version) {
         std::string new_ld_audit2 = "";
         const char* current_ld_audit2 = getenv("LD_AUDIT2");
 
-        for (const auto& aud : prior_auditors) new_ld_audit2 += aud + ":";
-        if (current_ld_audit2) new_ld_audit2 += std::string(current_ld_audit2) + ":";
-        for (const auto& aud : subsequent_auditors) new_ld_audit2 += aud + ":";
+        for (const auto& aud : prior_auditors) {
+            fprintf(stderr, "[audit_multiplexer] Moving prior auditor to LD_AUDIT2: %s\n", aud.c_str());
+            new_ld_audit2 += aud + ":";
+        }
 
-        if (!new_ld_audit2.empty() && new_ld_audit2.back() == ':') new_ld_audit2.pop_back();
+        if (current_ld_audit2) {
+            new_ld_audit2 += std::string(current_ld_audit2) + ":";
+        }
+
+        for (const auto& aud : subsequent_auditors) {
+            fprintf(stderr, "[audit_multiplexer] Moving subsequent LD_AUDIT entry to LD_AUDIT2: %s\n", aud.c_str());
+            new_ld_audit2 += aud + ":";
+        }
+
+        if (!new_ld_audit2.empty() && new_ld_audit2.back() == ':') {
+            new_ld_audit2.pop_back();
+        }
+
+        fprintf(stderr, "[audit_multiplexer] Setting LD_AUDIT=%s\n", my_path.c_str());
+        fprintf(stderr, "[audit_multiplexer] Setting LD_AUDIT2=%s\n", new_ld_audit2.c_str());
+        fprintf(stderr, "[audit_multiplexer] Executing /proc/self/exe...\n");
 
         setenv("LD_AUDIT", my_path.c_str(), 1);
         setenv("LD_AUDIT2", new_ld_audit2.c_str(), 1);
