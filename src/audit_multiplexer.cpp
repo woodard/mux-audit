@@ -111,6 +111,26 @@ static std::mutex g_history_mutex;
 static std::unordered_map<struct link_map*, uintptr_t> g_synthesized_cookies;
 static std::mutex g_synth_cookie_mutex;
 
+// Track the namespace LMID of every cookie (native or synthetic) for self-reporting bypass
+static std::unordered_map<uintptr_t*, Lmid_t> g_cookie_to_lmid;
+static std::mutex g_cookie_lmid_mutex;
+
+static void set_cookie_lmid(uintptr_t* cookie, Lmid_t lmid) {
+    if (!cookie) return;
+    std::lock_guard<std::mutex> lock(g_cookie_lmid_mutex);
+    g_cookie_to_lmid[cookie] = lmid;
+}
+
+static Lmid_t get_cookie_lmid(uintptr_t* cookie) {
+    if (!cookie) return -1;
+    std::lock_guard<std::mutex> lock(g_cookie_lmid_mutex);
+    auto it = g_cookie_to_lmid.find(cookie);
+    if (it != g_cookie_to_lmid.end()) {
+        return it->second;
+    }
+    return -1;
+}
+
 static uintptr_t* get_synth_cookie(struct link_map* map) {
     std::lock_guard<std::mutex> lock(g_synth_cookie_mutex);
     if (g_synthesized_cookies.find(map) == g_synthesized_cookies.end()) {
@@ -194,27 +214,11 @@ unsigned int la_version(unsigned int version) {
         std::string new_ld_audit2 = "";
         const char* current_ld_audit2 = getenv("LD_AUDIT2");
 
-        for (const auto& aud : prior_auditors) {
-            fprintf(stderr, "[audit_multiplexer] Moving prior auditor to LD_AUDIT2: %s\n", aud.c_str());
-            new_ld_audit2 += aud + ":";
-        }
+        for (const auto& aud : prior_auditors) new_ld_audit2 += aud + ":";
+        if (current_ld_audit2) new_ld_audit2 += std::string(current_ld_audit2) + ":";
+        for (const auto& aud : subsequent_auditors) new_ld_audit2 += aud + ":";
 
-        if (current_ld_audit2) {
-            new_ld_audit2 += std::string(current_ld_audit2) + ":";
-        }
-
-        for (const auto& aud : subsequent_auditors) {
-            fprintf(stderr, "[audit_multiplexer] Moving subsequent LD_AUDIT entry to LD_AUDIT2: %s\n", aud.c_str());
-            new_ld_audit2 += aud + ":";
-        }
-
-        if (!new_ld_audit2.empty() && new_ld_audit2.back() == ':') {
-            new_ld_audit2.pop_back();
-        }
-
-        fprintf(stderr, "[audit_multiplexer] Setting LD_AUDIT=%s\n", my_path.c_str());
-        fprintf(stderr, "[audit_multiplexer] Setting LD_AUDIT2=%s\n", new_ld_audit2.c_str());
-        fprintf(stderr, "[audit_multiplexer] Executing /proc/self/exe...\n");
+        if (!new_ld_audit2.empty() && new_ld_audit2.back() == ':') new_ld_audit2.pop_back();
 
         setenv("LD_AUDIT", my_path.c_str(), 1);
         setenv("LD_AUDIT2", new_ld_audit2.c_str(), 1);
@@ -289,8 +293,9 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
 
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
     am_register_map(map);
+    set_cookie_lmid(cookie, lmid); // Track native lmid mapping
+    
     bool is_new_ns = am_track_ns_cookie(lmid, cookie);
-
     uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(cookie);
 
     if (is_new_ns && ns_cookie) {
@@ -321,9 +326,9 @@ unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
 }
 
 void la_preinit(uintptr_t* cookie) {
-    struct r_debug* rdbg = &_r_debug;
-    if (rdbg && rdbg->r_map && rdbg->r_map->l_ld) {
-        struct link_map* lm = rdbg->r_map;
+    // 1. Safely extract PIE offsets for DT_AUDIT warnings
+    struct link_map* lm = la_cookie_to_link_map(cookie);
+    if (lm && lm->l_ld) {
         ElfW(Dyn)* dyn = (ElfW(Dyn)*)lm->l_ld;
         const char* strtab = nullptr;
         
@@ -352,72 +357,113 @@ void la_preinit(uintptr_t* cookie) {
         }
     }
 
-    std::unordered_set<uintptr_t*> subauditor_nscookies;
-    {
-        std::lock_guard<std::mutex> lock(g_history_mutex);
-        for (const auto& rec : g_history) {
-            if (rec.lmid != LM_ID_BASE) {
-                uintptr_t* ns = la_obj_cookie_to_ns_cookie(rec.cookie);
-                if (ns) subauditor_nscookies.insert(ns);
-            }
-        }
-    }
-
-    for (uintptr_t* ns_cookie : subauditor_nscookies) {
-        Lmid_t ns_lmid = -1;
+    // 2. Synthesize missing LM_ID_BASE events (e.g. audit_multiplexer.so itself) to sub-auditors
+    struct link_map* base_map = _r_debug.r_map;
+    while (base_map && base_map->l_prev) base_map = base_map->l_prev;
+    
+    while (base_map) {
+        bool is_tracked = false;
         {
             std::lock_guard<std::mutex> lock(g_history_mutex);
             for (const auto& rec : g_history) {
-                if (la_obj_cookie_to_ns_cookie(rec.cookie) == ns_cookie) {
-                    ns_lmid = rec.lmid;
-                    break;
-                }
+                if (rec.lmap == base_map) { is_tracked = true; break; }
             }
         }
         
-        for (auto& aud_ptr : get_auditors()) {
-            Lmid_t aud_lmid = -1;
-            dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
-            if (ns_lmid != aud_lmid) {
-                if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_ADD);
-            }
-        }
+        if (!is_tracked) {
+            uintptr_t* synthetic_cookie = get_synth_cookie(base_map);
+            set_cookie_lmid(synthetic_cookie, LM_ID_BASE);
+            am_track_ns_cookie(LM_ID_BASE, synthetic_cookie);
 
-        {
-            std::lock_guard<std::mutex> lock(g_history_mutex);
-            for (const auto& rec : g_history) {
-                if (la_obj_cookie_to_ns_cookie(rec.cookie) == ns_cookie) {
-                    for (auto& aud_ptr : get_auditors()) {
-                        Lmid_t aud_lmid = -1;
-                        dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
-                        if (ns_lmid != aud_lmid) {
-                            if (aud_ptr->objsearch) aud_ptr->objsearch(rec.lmap->l_name, rec.cookie, LA_SER_AUDIT);
-                            if (aud_ptr->objopen) {
-                                unsigned int sub_flags = aud_ptr->objopen(rec.lmap, rec.lmid, rec.cookie);
-                                std::unique_lock<std::shared_mutex> a_lock(aud_ptr->obj_mutex);
-                                aud_ptr->obj_flags[rec.cookie] = sub_flags;
-                            }
-                        }
-                    }
+            for (auto& aud_ptr : get_auditors()) {
+                if (aud_ptr->objsearch) {
+                    aud_ptr->objsearch(base_map->l_name, synthetic_cookie, LA_SER_AUDIT);
+                }
+                if (aud_ptr->objopen) {
+                    unsigned int sub_flags = aud_ptr->objopen(base_map, LM_ID_BASE, synthetic_cookie);
+                    std::unique_lock<std::shared_mutex> a_lock(aud_ptr->obj_mutex);
+                    aud_ptr->obj_flags[synthetic_cookie] = sub_flags;
                 }
             }
         }
-
-        for (auto& aud_ptr : get_auditors()) {
-            Lmid_t aud_lmid = -1;
-            dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
-            if (ns_lmid != aud_lmid) {
-                if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_CONSISTENT);
-            }
-        }
-        am_unmark_ns_added(ns_cookie);
+        base_map = base_map->l_next;
     }
 
-    for (auto& aud_ptr : get_auditors()) if (aud_ptr->preinit) aud_ptr->preinit(cookie);
+    // 3. Cross-pollinate sub-auditor namespaces (LM_ID_NEWLM) so they see each other.
+    for (size_t i = 0; i < get_auditors().size(); ++i) {
+        auto& aud_ptr = get_auditors()[i];
+        
+        Lmid_t ns_lmid = 0;
+        struct link_map* lmap = nullptr;
+        if (dlinfo(aud_ptr->handle, RTLD_DI_LMID, &ns_lmid) == 0 &&
+            dlinfo(aud_ptr->handle, RTLD_DI_LINKMAP, &lmap) == 0) {
+            
+            while (lmap && lmap->l_prev) lmap = lmap->l_prev;
+            
+            struct link_map* iter = lmap;
+            uintptr_t* ns_cookie = get_synth_cookie(lmap);
+            bool announced_add = false;
+
+            while (iter) {
+                bool is_tracked = false;
+                {
+                    std::lock_guard<std::mutex> lock(g_maps_mutex);
+                    for (auto m : g_all_maps) {
+                        if (m == iter) { is_tracked = true; break; }
+                    }
+                }
+
+                if (!is_tracked) {
+                    am_register_map(iter);
+                    uintptr_t* obj_cookie = get_synth_cookie(iter);
+                    set_cookie_lmid(obj_cookie, ns_lmid);
+
+                    bool is_new_ns = am_track_ns_cookie(ns_lmid, obj_cookie);
+                    
+                    if (is_new_ns) {
+                        am_mark_ns_added(ns_cookie);
+                        announced_add = true;
+                        
+                        for (size_t j = 0; j < get_auditors().size(); ++j) {
+                            if (i == j) continue; // Auditor should NOT see itself
+                            auto& other_aud = get_auditors()[j];
+                            if (other_aud->activity) other_aud->activity(ns_cookie, LA_ACT_ADD);
+                        }
+                    }
+
+                    for (size_t j = 0; j < get_auditors().size(); ++j) {
+                        if (i == j) continue; // Auditor should NOT see itself
+                        auto& other_aud = get_auditors()[j];
+                        if (other_aud->objsearch) other_aud->objsearch(iter->l_name, obj_cookie, LA_SER_AUDIT);
+                        if (other_aud->objopen) {
+                            unsigned int sub_flags = other_aud->objopen(iter, ns_lmid, obj_cookie);
+                            std::unique_lock<std::shared_mutex> a_lock(other_aud->obj_mutex);
+                            other_aud->obj_flags[obj_cookie] = sub_flags;
+                        }
+                    }
+                }
+                iter = iter->l_next;
+            }
+
+            if (announced_add) {
+                for (size_t j = 0; j < get_auditors().size(); ++j) {
+                    if (i == j) continue;
+                    auto& other_aud = get_auditors()[j];
+                    if (other_aud->activity) other_aud->activity(ns_cookie, LA_ACT_CONSISTENT);
+                }
+                am_unmark_ns_added(ns_cookie);
+            }
+        }
+    }
+
+    for (auto& aud_ptr : get_auditors()) {
+        if (aud_ptr->preinit) aud_ptr->preinit(cookie);
+    }
 }
 
 void la_activity(uintptr_t* cookie, unsigned int flag) {
     uintptr_t* effective_cookie = translate_cookie(cookie);
+    Lmid_t act_lmid = get_cookie_lmid(effective_cookie);
 
     if (flag == LA_ACT_ADD) {
         if (!am_mark_ns_added(effective_cookie)) return;
@@ -429,6 +475,10 @@ void la_activity(uintptr_t* cookie, unsigned int flag) {
     }
 
     for (auto& aud_ptr : get_auditors()) {
+        Lmid_t aud_lmid = -1;
+        dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
+        if (act_lmid != -1 && act_lmid == aud_lmid) continue; // Prevent self-reporting
+
         if (aud_ptr->activity) {
             aud_ptr->activity(effective_cookie, flag);
         }
@@ -438,9 +488,14 @@ void la_activity(uintptr_t* cookie, unsigned int flag) {
 unsigned int la_objclose(uintptr_t* cookie) {
     uintptr_t* effective_cookie = translate_cookie(cookie);
     uintptr_t* ns_cookie = la_obj_cookie_to_ns_cookie(effective_cookie);
+    Lmid_t close_lmid = get_cookie_lmid(effective_cookie);
     
     if (ns_cookie && am_mark_ns_deleting(ns_cookie)) {
         for (auto& aud_ptr : get_auditors()) {
+            Lmid_t aud_lmid = -1;
+            dlinfo(aud_ptr->handle, RTLD_DI_LMID, &aud_lmid);
+            if (close_lmid != -1 && close_lmid == aud_lmid) continue; // Prevent self-reporting
+
             if (aud_ptr->activity) aud_ptr->activity(ns_cookie, LA_ACT_DELETE);
         }
     }
