@@ -4,37 +4,13 @@
 #include <iostream>
 #include <link.h>
 #include <dlfcn.h>
+#include <sys/auxv.h>
+#include <elf.h>
+#include <string.h>
 
 // Force a large Initial Exec TLS allocation (32KB)
 // This is significantly larger than glibc's default surplus TLS pool.
 __thread char large_tls_array[32768] __attribute__((tls_model("initial-exec")));
-
-// Anchor function to locate this specific binary in memory
-static void anchor_function() {}
-
-static int tls_size_callback(struct dl_phdr_info *info, size_t size, void *data) {
-    size_t* out_tls_size = reinterpret_cast<size_t*>(data);
-    
-    // Check if this shared object contains our anchor function
-    void* anchor_ptr = reinterpret_cast<void*>(anchor_function);
-    if (anchor_ptr >= reinterpret_cast<void*>(info->dlpi_addr) && 
-        anchor_ptr < reinterpret_cast<void*>(info->dlpi_addr + 0x10000000)) { 
-        
-        // Use dladdr for absolute confirmation
-        Dl_info dl_info;
-        if (dladdr(anchor_ptr, &dl_info) && dl_info.dli_fbase == reinterpret_cast<void*>(info->dlpi_addr)) {
-            
-            // Iterate through the program headers looking for the TLS segment
-            for (int i = 0; i < info->dlpi_phnum; i++) {
-                if (info->dlpi_phdr[i].p_type == PT_TLS) {
-                    *out_tls_size = info->dlpi_phdr[i].p_memsz;
-                    return 1; // Stop iterating
-                }
-            }
-        }
-    }
-    return 0; // Continue iterating
-}
 
 int main() {
     // Touch the memory across page boundaries to ensure it is fully allocated
@@ -42,11 +18,67 @@ int main() {
         large_tls_array[i] = 'A';
     }
     
-    size_t my_tls_size = 0;
-    dl_iterate_phdr(tls_size_callback, &my_tls_size);
-    
     std::cout << "[main] Application executing successfully with large IE TLS." << std::endl;
-    std::cout << "[main] Confirmed application TLS segment size: " << my_tls_size << " bytes." << std::endl;
+    
+    // Use r_debug_extended to iterate through all namespaces (including sub-auditors)
+    struct r_debug_extended* ext_debug = reinterpret_cast<struct r_debug_extended*>(&_r_debug);
+    int ns_id = 0;
+    
+    while (ext_debug != nullptr) {
+        struct link_map* lmap = ext_debug->base.r_map;
+        
+        // Ensure we start at the head of the link_map chain for this namespace
+        while (lmap && lmap->l_prev) lmap = lmap->l_prev;
+        
+        while (lmap) {
+            const char* name = (lmap->l_name && lmap->l_name[0]) ? lmap->l_name : "[main executable]";
+            const char* base_name = strrchr(name, '/');
+            base_name = base_name ? base_name + 1 : name;
+            
+            ElfW(Phdr)* phdr = nullptr;
+            size_t phnum = 0;
+            
+            // Memory-based Program Header Iteration
+            if (lmap->l_addr == 0 && name[0] == '[') {
+                // The main executable might not have its ELF header mapped at l_addr. 
+                // We use getauxval to safely locate its Program Headers.
+                phdr = reinterpret_cast<ElfW(Phdr)*>(getauxval(AT_PHDR));
+                phnum = getauxval(AT_PHNUM);
+            } else {
+                // For shared objects and PIE binaries, the ELF header is at l_addr.
+                ElfW(Ehdr)* ehdr = reinterpret_cast<ElfW(Ehdr)*>(lmap->l_addr);
+                
+                // Verify the magic bytes to ensure it's a valid mapped ELF header
+                if (ehdr && ehdr->e_ident[EI_MAG0] == ELFMAG0 && ehdr->e_ident[EI_MAG1] == ELFMAG1 &&
+                    ehdr->e_ident[EI_MAG2] == ELFMAG2 && ehdr->e_ident[EI_MAG3] == ELFMAG3) {
+                    
+                    phdr = reinterpret_cast<ElfW(Phdr)*>(lmap->l_addr + ehdr->e_phoff);
+                    phnum = ehdr->e_phnum;
+                }
+            }
+
+            size_t my_tls_size = 0;
+            if (phdr) {
+                // Iterate the headers looking for the TLS segment
+                for (size_t i = 0; i < phnum; i++) {
+                    if (phdr[i].p_type == PT_TLS) {
+                        my_tls_size = phdr[i].p_memsz;
+                        break;
+                    }
+                }
+            }
+            
+            // Only print if the object actually has a TLS segment
+            if (my_tls_size > 0) {
+                std::cout << "[main] Namespace " << ns_id << " | " << base_name 
+                          << " TLS segment size: " << my_tls_size << " bytes." << std::endl;
+            }
+            
+            lmap = lmap->l_next;
+        }
+        ext_debug = ext_debug->r_next;
+        ns_id++;
+    }
     
     return 0;
 }

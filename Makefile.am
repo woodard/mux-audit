@@ -13,8 +13,8 @@ lib_LTLIBRARIES = libaudit_utils.la audit_multiplexer.la
 libaudit_utils_la_SOURCES = src/audit_utils.cpp
 libaudit_utils_la_CPPFLAGS = -I$(top_srcdir)/include
 
-# Setup the multiplexer module
-audit_multiplexer_la_SOURCES = src/audit_multiplexer.cpp
+# Setup the multiplexer module (Added tls_calculator.cpp)
+audit_multiplexer_la_SOURCES = src/audit_multiplexer.cpp src/tls_calculator.cpp
 audit_multiplexer_la_CPPFLAGS = -I$(top_srcdir)/include
 audit_multiplexer_la_LDFLAGS = -module -avoid-version -shared -Wl,-z,now
 audit_multiplexer_la_LIBADD = libaudit_utils.la -ldl $(LIBELF_LIBS)
