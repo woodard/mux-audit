@@ -36,7 +36,7 @@ else
 fi
 
 # Condition 3: Verify the application dynamically found and printed the auditor's TLS size
-if echo "$OUTPUT" | grep -q "test_tls_auditor.so TLS segment size: "; then
+if echo "$OUTPUT" | grep -q "test_tls_auditor.so TLS segment size:"; then
     echo "PASS: Application iterated namespaces and successfully identified the auditor's static TLS size."
 else
     echo "FAIL: Application did not identify the auditor's TLS size across namespace boundaries."
@@ -46,4 +46,9 @@ else
 fi
 
 echo "All TLS Injection conditions passed."
+echo ""
+echo "=== Captured Test Output ==="
+echo "$OUTPUT"
+echo "============================"
+
 exit 0

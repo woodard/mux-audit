@@ -12,6 +12,9 @@
 // This is significantly larger than glibc's default surplus TLS pool.
 __thread char large_tls_array[32768] __attribute__((tls_model("initial-exec")));
 
+// The _DYNAMIC array is populated by the linker and contains the DT_DEBUG pointer
+extern ElfW(Dyn) _DYNAMIC[];
+
 int main() {
     // Touch the memory across page boundaries to ensure it is fully allocated
     for (int i = 0; i < 32768; i += 4096) {
@@ -20,16 +23,36 @@ int main() {
     
     std::cout << "[main] Application executing successfully with large IE TLS." << std::endl;
     
-    // Use r_debug_extended to iterate through all namespaces (including sub-auditors)
-    struct r_debug_extended* ext_debug = reinterpret_cast<struct r_debug_extended*>(&_r_debug);
-    int ns_id = 0;
+    // Locate the canonical r_debug struct managed by ld.so via DT_DEBUG
+    struct r_debug* real_r_debug = nullptr;
+    for (ElfW(Dyn)* dyn = _DYNAMIC; dyn->d_tag != DT_NULL; ++dyn) {
+        if (dyn->d_tag == DT_DEBUG) {
+            real_r_debug = reinterpret_cast<struct r_debug*>(dyn->d_un.d_ptr);
+            break;
+        }
+    }
+
+    if (!real_r_debug) {
+        std::cout << "[main] FATAL: Could not locate DT_DEBUG pointer." << std::endl;
+        return 1;
+    }
+
+    struct r_debug_extended* ext_debug = reinterpret_cast<struct r_debug_extended*>(real_r_debug);
+    if (ext_debug->base.r_version < 2) {
+        std::cout << "[main] glibc r_version < 2, cannot securely traverse dynamic namespaces." << std::endl;
+    }
     
+    int ns_id = 0;
     while (ext_debug != nullptr) {
         struct link_map* lmap = ext_debug->base.r_map;
         
         // Ensure we start at the head of the link_map chain for this namespace
         while (lmap && lmap->l_prev) lmap = lmap->l_prev;
         
+        if (lmap) {
+            std::cout << "[main] Discovered Namespace " << ns_id << std::endl;
+        }
+
         while (lmap) {
             const char* name = (lmap->l_name && lmap->l_name[0]) ? lmap->l_name : "[main executable]";
             const char* base_name = strrchr(name, '/');
@@ -57,25 +80,23 @@ int main() {
                 }
             }
 
-            size_t my_tls_size = 0;
             if (phdr) {
                 // Iterate the headers looking for the TLS segment
                 for (size_t i = 0; i < phnum; i++) {
                     if (phdr[i].p_type == PT_TLS) {
-                        my_tls_size = phdr[i].p_memsz;
+                        std::cout << "[main] Namespace " << ns_id << " | " << base_name 
+                                  << " TLS segment size: " << phdr[i].p_memsz << " bytes." << std::endl;
                         break;
                     }
                 }
             }
             
-            // Only print if the object actually has a TLS segment
-            if (my_tls_size > 0) {
-                std::cout << "[main] Namespace " << ns_id << " | " << base_name 
-                          << " TLS segment size: " << my_tls_size << " bytes." << std::endl;
-            }
-            
             lmap = lmap->l_next;
         }
+        
+        // If glibc doesn't support namespace iteration, stop here
+        if (ext_debug->base.r_version < 2) break; 
+        
         ext_debug = ext_debug->r_next;
         ns_id++;
     }
