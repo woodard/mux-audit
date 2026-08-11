@@ -98,6 +98,9 @@ TESTS = \
     run_test5.sh \
     run_test6.sh \
     run_test_dtaudit.sh \
-    test_activity.sh
+    run_test_activity_ordering.sh \
+    run_test_activity_cross_pollination.sh \
+    run_test_activity_cookie_match.sh \
+    run_test_activity_objclose.sh
 
 EXTRA_DIST = $(TESTS) README.md
