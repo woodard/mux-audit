@@ -197,6 +197,7 @@ unsigned int la_version(unsigned int version) {
     setenv("AM_MUX_ACTIVE", "1", 1);
 
     bool requires_reexec = false;
+    bool uncontrolled_auditors = false;
     std::vector<std::string> prior_auditors;
     std::vector<std::string> subsequent_auditors;
 
@@ -224,9 +225,11 @@ unsigned int la_version(unsigned int version) {
             if (!found_myself) {
                 prior_auditors.push_back(token);
                 requires_reexec = true;
+                uncontrolled_auditors = true;
             } else {
                 subsequent_auditors.push_back(token);
                 requires_reexec = true;
+                uncontrolled_auditors = true;
             }
         }
     }
@@ -244,9 +247,20 @@ unsigned int la_version(unsigned int version) {
     for (const auto& aud : subsequent_auditors) {
         final_sub_auditors.push_back(aud);
     }
+    
+    // Fixed: Explicitly push our own multiplexer library so its dependencies 
+    // and internal TLS are appropriately counted in the requirement.
+    final_sub_auditors.push_back(my_path);
 
     // Determine Required Static TLS and Verify Tunable
     size_t required_tls = calculate_ie_tls(final_sub_auditors, "/proc/self/exe");
+    
+    // Fixed: Mirror glibc by adding a standard surplus reserve block to allow 
+    // the application to gracefully dlopen plugins that rely on static TLS.
+    if (required_tls > 0) {
+        required_tls += 4096;
+    }
+    
     bool tls_needs_update = false;
     std::string new_tunables = "";
 
@@ -289,8 +303,13 @@ unsigned int la_version(unsigned int version) {
     
     // Re-exec if we are not in exclusive control or if TLS is undersized
     if (requires_reexec) {
-        fprintf(stderr, "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing...\n");
-
+        
+        // Fixed: Ensure the uncontrolled warning is only printed if uncontrolled 
+        // auditors actually triggered the re-execution, not just a TLS adjustment.
+        if (uncontrolled_auditors) {
+            fprintf(stderr, "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing...\n");
+        }
+        
         if (tls_needs_update) {
             fprintf(stderr, "audit_multiplexer: reexecing to acquire more static TLS.\n");
             fprintf(stderr, "[audit_multiplexer] Requested %s\n", new_tunables.c_str());

@@ -159,7 +159,10 @@ size_t calculate_ie_tls(const std::vector<std::string>& audit_libs, const std::s
         std::vector<std::string> dependencies;
         TlsInfo tls_info = get_elf_tls_info(current_lib, dependencies);
 
-        if (tls_info.size > 0 && tls_info.requires_ie) {
+        // Fixed: We must account for ALL libraries that have a PT_TLS segment (size > 0),
+        // because glibc allocates static TLS for any object loaded during process startup,
+        // regardless of whether it explicitly mandates DF_STATIC_TLS.
+        if (tls_info.size > 0) {
             dl_tls_static_align = std::max(dl_tls_static_align, tls_info.align);
             dl_tls_static_size = roundup(dl_tls_static_size, tls_info.align) + tls_info.size;
         }
