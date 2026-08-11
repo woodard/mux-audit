@@ -16,7 +16,7 @@ if [ $EXIT_CODE -ne 0 ]; then
 fi
 
 # Condition 1: Verify the multiplexer detected the requirement and injected the tunable
-if echo "$OUTPUT" | grep -q "\[audit_multiplexer\] Adjusting GLIBC_TUNABLES for static TLS requirement"; then
+if echo "$OUTPUT" | grep -q "audit_multiplexer: reexecing to acquire more static TLS."; then
     echo "PASS: Multiplexer dynamically calculated and injected GLIBC_TUNABLES."
 else
     echo "FAIL: Multiplexer did not emit the GLIBC_TUNABLES adjustment warning."

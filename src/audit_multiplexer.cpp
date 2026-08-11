@@ -280,7 +280,8 @@ unsigned int la_version(unsigned int version) {
         fprintf(stderr, "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing...\n");
 
         if (tls_needs_update) {
-            fprintf(stderr, "[audit_multiplexer] Adjusting GLIBC_TUNABLES for static TLS requirement (%zu bytes)...\n", required_tls);
+            fprintf(stderr, "audit_multiplexer: reexecing to acquire more static TLS.\n");
+            fprintf(stderr, "[audit_multiplexer] Requested %s\n", new_tunables.c_str());
             setenv("GLIBC_TUNABLES", new_tunables.c_str(), 1);
         }
 
