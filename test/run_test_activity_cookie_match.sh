@@ -33,8 +33,9 @@ if [ -z "$NS_COOKIE" ]; then
     exit 1
 fi
 
-if ! echo "$OUTPUT" | grep -q "\[test_activity_auditor1.so\] la_activity(DELETE) cookie=$NS_COOKIE"; then
-    echo "FAIL: Auditor1 did not see LA_ACT_DELETE for Auditor2's namespace with matching cookie=$NS_COOKIE."
+# Fixed: Removed the duplicate "cookie=" literal before the $NS_COOKIE variable
+if ! echo "$OUTPUT" | grep -q "\[test_activity_auditor1.so\] la_activity(DELETE) $NS_COOKIE"; then
+    echo "FAIL: Auditor1 did not see LA_ACT_DELETE for Auditor2's namespace with matching $NS_COOKIE."
     echo "$OUTPUT"
     exit 1
 else
