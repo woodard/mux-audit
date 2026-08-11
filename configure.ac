@@ -23,6 +23,11 @@ AC_CHECK_TYPE([struct r_debug_extended],
               [AC_MSG_ERROR([glibc is too old: struct r_debug_extended not found in <link.h>. A newer glibc with multi-namespace support is strictly required.])],
               [[#include <link.h>]])
 
+# Check for libelf / elfutils (required for TLS sizing calculation)
+AC_CHECK_HEADERS([libelf.h gelf.h], [], [AC_MSG_ERROR([Required elfutils headers (libelf.h, gelf.h) not found. Please install elfutils-devel or libelf-dev.])])
+AC_CHECK_LIB([elf], [elf_begin], [LIBELF_LIBS="-lelf"], [AC_MSG_ERROR([libelf (elfutils) is required but was not found. Please install elfutils-libelf or libelf-dev.])])
+AC_SUBST([LIBELF_LIBS])
+
 # Output Makefiles
 AC_CONFIG_FILES([
     Makefile

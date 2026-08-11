@@ -40,6 +40,22 @@
 #include <fstream>
 #include <sstream>
 #include <elf.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <libelf.h>
+#include <gelf.h>
+#include <algorithm>
+
+// --- glibc arithmetic macros for alignment padding ---
+#define roundup(x, y)  ((((x) + (y) - 1) / (y)) * (y))
+
+struct TlsInfo {
+    size_t size;
+    size_t align;
+    bool requires_ie;
+    std::string rpath;
+    std::string runpath;
+};
 
 // -----------------------------------------------------------------------------
 // Core Tracking Structures
@@ -121,9 +137,6 @@ static std::mutex g_synth_cookie_mutex;
 static std::unordered_map<uintptr_t*, Lmid_t> g_cookie_to_lmid;
 static std::mutex g_cookie_lmid_mutex;
 
-// Structural offset calculated at runtime to robustly map uninitialized glibc cookies
-static size_t g_cookie_offset = 0;
-
 static void set_cookie_lmid(uintptr_t* cookie, Lmid_t lmid) {
     if (!cookie) return;
     std::lock_guard<std::mutex> lock(g_cookie_lmid_mutex);
@@ -148,17 +161,9 @@ static uintptr_t* get_synth_cookie(struct link_map* map) {
     return &g_synthesized_cookies[map];
 }
 
-static struct link_map* get_lmap_from_cookie(uintptr_t* cookie) {
-    if (!cookie) return nullptr;
-    if (g_cookie_offset != 0) {
-        return reinterpret_cast<struct link_map*>(reinterpret_cast<char*>(cookie) - g_cookie_offset);
-    }
-    return la_cookie_to_link_map(cookie);
-}
-
 static uintptr_t* translate_cookie(uintptr_t* glibc_cookie) {
     if (!glibc_cookie) return nullptr;
-    struct link_map* lmap = get_lmap_from_cookie(glibc_cookie);
+    struct link_map* lmap = la_cookie_to_link_map(glibc_cookie);
     if (lmap) {
         std::lock_guard<std::mutex> lock(g_synth_cookie_mutex);
         auto it = g_synthesized_cookies.find(lmap);
@@ -181,6 +186,156 @@ static std::vector<char*> get_cmdline_args() {
     args.push_back(nullptr);
     return args;
 }
+
+// -----------------------------------------------------------------------------
+// Initial Exec TLS Sizing Logic
+// -----------------------------------------------------------------------------
+
+static bool file_exists(const std::string& path) {
+    struct stat buffer;
+    return (stat(path.c_str(), &buffer) == 0 && S_ISREG(buffer.st_mode));
+}
+
+static std::string expand_origin(std::string path, const std::string& origin) {
+    size_t pos;
+    while ((pos = path.find("$ORIGIN")) != std::string::npos) path.replace(pos, 7, origin);
+    while ((pos = path.find("${ORIGIN}")) != std::string::npos) path.replace(pos, 9, origin);
+    return path;
+}
+
+static std::string search_path_list(const std::string& path_list, const std::string& dep_name, const std::string& origin) {
+    if (path_list.empty()) return "";
+    std::stringstream ss(path_list);
+    std::string dir;
+    while (std::getline(ss, dir, ':')) {
+        if (dir.empty()) continue;
+        std::string expanded_dir = expand_origin(dir, origin);
+        if (expanded_dir.back() != '/') expanded_dir += '/';
+        std::string full_path = expanded_dir + dep_name;
+        if (file_exists(full_path)) return full_path;
+    }
+    return "";
+}
+
+static std::string resolve_dependency_path(const std::string& dep_name, const std::string& loading_obj_path,
+                                    const std::string& rpath, const std::string& runpath) {
+    std::string origin = ".";
+    size_t slash_pos = loading_obj_path.find_last_of('/');
+    if (slash_pos != std::string::npos) origin = loading_obj_path.substr(0, slash_pos);
+    else if (!loading_obj_path.empty()) origin = "."; 
+
+    std::string found_path;
+    if (runpath.empty() && !rpath.empty()) {
+        found_path = search_path_list(rpath, dep_name, origin);
+        if (!found_path.empty()) return found_path;
+    }
+
+    const char* ld_lib_path_env = std::getenv("LD_LIBRARY_PATH");
+    if (ld_lib_path_env) {
+        found_path = search_path_list(ld_lib_path_env, dep_name, origin);
+        if (!found_path.empty()) return found_path;
+    }
+
+    if (!runpath.empty()) {
+        found_path = search_path_list(runpath, dep_name, origin);
+        if (!found_path.empty()) return found_path;
+    }
+
+    std::vector<std::string> default_paths = {"/lib/x86_64-linux-gnu/", "/usr/lib/x86_64-linux-gnu/", "/lib/", "/usr/lib/"};
+    for (const auto& dir : default_paths) {
+        std::string full_path = dir + dep_name;
+        if (file_exists(full_path)) return full_path;
+    }
+    return ""; 
+}
+
+static TlsInfo get_elf_tls_info(const std::string& filepath, std::vector<std::string>& out_dependencies) {
+    TlsInfo info = {0, 1, false, "", ""};
+    if (elf_version(EV_CURRENT) == EV_NONE) return info;
+
+    int fd = open(filepath.c_str(), O_RDONLY);
+    if (fd < 0) return info;
+
+    Elf* elf = elf_begin(fd, ELF_C_READ, NULL);
+    if (!elf) { close(fd); return info; }
+
+    size_t phnum;
+    if (elf_getphdrnum(elf, &phnum) == 0) {
+        for (size_t i = 0; i < phnum; i++) {
+            GElf_Phdr phdr;
+            if (gelf_getphdr(elf, i, &phdr) == &phdr && phdr.p_type == PT_TLS) {
+                info.size = phdr.p_memsz;
+                info.align = phdr.p_align ? phdr.p_align : 1;
+            }
+        }
+    }
+
+    Elf_Scn* scn = NULL;
+    while ((scn = elf_nextscn(elf, scn)) != NULL) {
+        GElf_Shdr shdr;
+        if (gelf_getshdr(scn, &shdr) != &shdr) continue;
+
+        if (shdr.sh_type == SHT_DYNAMIC) {
+            Elf_Data* data = elf_getdata(scn, NULL);
+            size_t dyn_entries = shdr.sh_size / shdr.sh_entsize;
+            for (size_t i = 0; i < dyn_entries; i++) {
+                GElf_Dyn dyn;
+                gelf_getdyn(data, i, &dyn);
+                if (dyn.d_tag == DT_FLAGS && (dyn.d_un.d_val & DF_STATIC_TLS)) info.requires_ie = true;
+                else if (dyn.d_tag == DT_NEEDED) {
+                    const char* dep_name = elf_strptr(elf, shdr.sh_link, dyn.d_un.d_val);
+                    if (dep_name) out_dependencies.push_back(dep_name);
+                } else if (dyn.d_tag == DT_RPATH) {
+                    const char* r = elf_strptr(elf, shdr.sh_link, dyn.d_un.d_val);
+                    if (r) info.rpath = r;
+                } else if (dyn.d_tag == DT_RUNPATH) {
+                    const char* r = elf_strptr(elf, shdr.sh_link, dyn.d_un.d_val);
+                    if (r) info.runpath = r;
+                }
+            }
+        }
+    }
+
+    GElf_Ehdr ehdr;
+    if (gelf_getehdr(elf, &ehdr) && ehdr.e_type == ET_EXEC) info.requires_ie = true; 
+
+    elf_end(elf);
+    close(fd);
+    return info;
+}
+
+static size_t calculate_ie_tls(const std::vector<std::string>& audit_libs, const std::string& app_name) {
+    size_t dl_tls_static_size = 0;
+    size_t dl_tls_static_align = 1;
+    std::unordered_set<std::string> visited;
+    std::vector<std::string> to_process = audit_libs;
+    to_process.push_back(app_name);
+
+    while (!to_process.empty()) {
+        std::string current_lib = to_process.back();
+        to_process.pop_back();
+
+        if (visited.find(current_lib) != visited.end()) continue;
+        visited.insert(current_lib);
+
+        std::vector<std::string> dependencies;
+        TlsInfo tls_info = get_elf_tls_info(current_lib, dependencies);
+
+        if (tls_info.size > 0 && tls_info.requires_ie) {
+            dl_tls_static_align = std::max(dl_tls_static_align, tls_info.align);
+            dl_tls_static_size = roundup(dl_tls_static_size, tls_info.align) + tls_info.size;
+        }
+
+        for (const auto& dep : dependencies) {
+            std::string full_path = resolve_dependency_path(dep, current_lib, tls_info.rpath, tls_info.runpath);
+            if (!full_path.empty() && visited.find(full_path) == visited.end()) {
+                to_process.push_back(full_path);
+            }
+        }
+    }
+    return roundup(dl_tls_static_size, dl_tls_static_align);
+}
+
 
 extern "C" {
 
@@ -228,14 +383,74 @@ unsigned int la_version(unsigned int version) {
             }
         }
     }
+
+    // Accumulate the final list of target sub-auditors to accurately size TLS
+    std::vector<std::string> final_sub_auditors = prior_auditors;
+    const char* current_ld_audit2 = getenv("LD_AUDIT2");
+    if (current_ld_audit2) {
+        std::stringstream ss(current_ld_audit2);
+        std::string token;
+        while (std::getline(ss, token, ':')) {
+            if (!token.empty()) final_sub_auditors.push_back(token);
+        }
+    }
+    for (const auto& aud : subsequent_auditors) {
+        final_sub_auditors.push_back(aud);
+    }
+
+    // Determine Required Static TLS and Verify Tunable
+    size_t required_tls = calculate_ie_tls(final_sub_auditors, "/proc/self/exe");
+    bool tls_needs_update = false;
+    std::string new_tunables = "";
+
+    if (required_tls > 0) {
+        std::string existing_tunables = "";
+        const char* env_tunables = getenv("GLIBC_TUNABLES");
+        if (env_tunables) existing_tunables = env_tunables;
+
+        size_t current_tls_val = 0;
+        size_t pos = existing_tunables.find("glibc.rtld.optional_static_tls=");
+        if (pos != std::string::npos) {
+            size_t val_start = pos + 31;
+            size_t val_end = existing_tunables.find(':', val_start);
+            std::string val_str = existing_tunables.substr(val_start, val_end - val_start);
+            try {
+                current_tls_val = std::stoull(val_str);
+            } catch (...) {
+                current_tls_val = 0;
+            }
+        }
+
+        if (current_tls_val < required_tls) {
+            tls_needs_update = true;
+            requires_reexec = true; // Enforce re-exec to ensure TLS allocation
+            
+            if (pos != std::string::npos) {
+                size_t val_end = existing_tunables.find(':', pos);
+                if (val_end != std::string::npos) {
+                    new_tunables = existing_tunables.substr(0, pos) + existing_tunables.substr(val_end + 1);
+                } else {
+                    new_tunables = (pos > 0 && existing_tunables[pos-1] == ':') ? existing_tunables.substr(0, pos-1) : existing_tunables.substr(0, pos);
+                }
+            } else {
+                new_tunables = existing_tunables;
+            }
+            if (!new_tunables.empty() && new_tunables.back() != ':') new_tunables += ":";
+            new_tunables += "glibc.rtld.optional_static_tls=" + std::to_string(required_tls);
+        }
+    }
     
-    // Re-exec if we are not in exclusive control
+    // Re-exec if we are not in exclusive control or if TLS is undersized
     if (requires_reexec) {
         fprintf(stderr, "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing...\n");
 
-        std::string new_ld_audit2 = "";
-        const char* current_ld_audit2 = getenv("LD_AUDIT2");
+        if (tls_needs_update) {
+            fprintf(stderr, "[audit_multiplexer] Adjusting GLIBC_TUNABLES for static TLS requirement (%zu bytes)...\n", required_tls);
+            setenv("GLIBC_TUNABLES", new_tunables.c_str(), 1);
+        }
 
+        std::string new_ld_audit2 = "";
+        
         for (const auto& aud : prior_auditors) {
             fprintf(stderr, "[audit_multiplexer] Moving prior auditor to LD_AUDIT2: %s\n", aud.c_str());
             new_ld_audit2 += aud + ":";
@@ -335,10 +550,6 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
 
 // 3. Object Open
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
-    if (g_cookie_offset == 0 && map && cookie) {
-        g_cookie_offset = reinterpret_cast<char*>(cookie) - reinterpret_cast<char*>(map);
-    }
-
     am_register_map(map);
     set_cookie_lmid(cookie, lmid); 
     
@@ -409,6 +620,7 @@ void la_preinit(uintptr_t* cookie) {
         }
     }
 
+    // Append any pre-existing LM_ID_BASE objects (like audit_multiplexer itself) to g_history
     struct link_map* base_map = _r_debug.r_map;
     while (base_map && base_map->l_prev) base_map = base_map->l_prev;
     
@@ -440,6 +652,7 @@ void la_preinit(uintptr_t* cookie) {
         base_map = base_map->l_next;
     }
 
+    // Cross-pollinate sub-auditor namespaces (LM_ID_NEWLM) so they see each other.
     for (size_t i = 0; i < get_auditors().size(); ++i) {
         auto& aud_ptr = get_auditors()[i];
         
@@ -475,14 +688,14 @@ void la_preinit(uintptr_t* cookie) {
                         announced_add = true;
                         
                         for (size_t j = 0; j < get_auditors().size(); ++j) {
-                            if (i == j) continue; 
+                            if (i == j) continue; // Auditor should NOT see itself
                             auto& other_aud = get_auditors()[j];
                             if (other_aud->activity) other_aud->activity(ns_cookie, LA_ACT_ADD);
                         }
                     }
 
                     for (size_t j = 0; j < get_auditors().size(); ++j) {
-                        if (i == j) continue; 
+                        if (i == j) continue; // Auditor should NOT see itself
                         auto& other_aud = get_auditors()[j];
                         if (other_aud->objsearch) other_aud->objsearch(iter->l_name, obj_cookie, LA_SER_AUDIT);
                         if (other_aud->objopen) {

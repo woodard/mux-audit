@@ -8,7 +8,7 @@ AM_TESTS_ENVIRONMENT = \
     LD_BIND_NOW=1; export LD_BIND_NOW; \
     LD_LIBRARY_PATH='$(builddir)/.libs:$(top_builddir)/.libs'; export LD_LIBRARY_PATH;
 
-check_PROGRAMS = dummy_main test4_main dt_audit_app test_activity_main
+check_PROGRAMS = dummy_main test4_main dt_audit_app test_activity_main test_tls_main
 check_LTLIBRARIES = \
     libtest1_auditor.la \
     libtest2_auditor.la \
@@ -21,12 +21,13 @@ check_LTLIBRARIES = \
     libdummy_auditor.la \
     libgood.la \
     libbad.la \
-    test_activity_auditor.la
+    test_activity_auditor.la \
+    test_tls_auditor.la
 
 # The target executable for both tests
 dummy_main_SOURCES = dummy_main.cpp
 
-# DT_AUDIT App (Compiled with a rogue auditor in the ELF header)
+# DT_AUDIT App
 dt_audit_app_SOURCES = dt_audit_app.cpp
 dt_audit_app_LDFLAGS = -Wl,--audit="libdummy_auditor.so"
 
@@ -89,6 +90,13 @@ libbad_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
 test_activity_auditor_la_SOURCES = test_activity_auditor.c
 test_activity_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
 
+# Static TLS Test: Main Target
+test_tls_main_SOURCES = test_tls_main.cpp
+
+# Static TLS Test: Auditor
+test_tls_auditor_la_SOURCES = test_tls_auditor.cpp
+test_tls_auditor_la_LDFLAGS = -module -avoid-version -shared -rpath /tmp -Wl,-z,now
+
 # Run the test scripts
 TESTS = \
     run_test1.sh \
@@ -101,6 +109,7 @@ TESTS = \
     run_test_activity_ordering.sh \
     run_test_activity_cross_pollination.sh \
     run_test_activity_cookie_match.sh \
-    run_test_activity_objclose.sh
+    run_test_activity_objclose.sh \
+    run_test_tls_injection.sh
 
 EXTRA_DIST = $(TESTS) README.md
