@@ -29,42 +29,40 @@ else
 fi
 
 # Condition 1: First auditor sees loading of 2nd auditor
-if ! echo "$OUTPUT" | grep -q "la_objopen('test_activity_auditor2.so')"; then
-    echo "FAIL: Auditor1 did not see the la_objopen for Auditor2."
+if ! echo "$OUTPUT" | grep -q "\[test_activity_auditor1.so\] la_objopen('test_activity_auditor2.so')"; then
+    echo "FAIL: Auditor1 did not see la_objopen for Auditor2."
     echo "$OUTPUT"
     exit 1
 else
-    echo "PASS: Condition 1 (Sibling auditor cross-pollination)."
+    echo "PASS: Condition 1 (Auditor1 sees Auditor2 load)."
 fi
 
-# Condition 2: Cookie match between ADD and DELETE for the 2nd auditor
-ADD_COOKIE=$(echo "$OUTPUT" | grep -B1 "la_objopen('test_activity_auditor2.so')" | grep "la_activity(ADD)" | grep -oE "cookie=0x[0-9a-f]+" | head -n 1)
-DELETE_COOKIE=$(echo "$OUTPUT" | grep -A2 "la_objclose() cookie=${ADD_COOKIE#cookie=}" | grep "la_activity(DELETE)" | grep -oE "cookie=0x[0-9a-f]+" | tail -n 1)
+# Condition 2: Cookie match between ADD and DELETE for the 2nd auditor's namespace
+LINE_NUM=$(echo "$OUTPUT" | grep -n "\[test_activity_auditor1.so\] la_objopen('test_activity_auditor2.so')" | cut -d: -f1 | head -n 1)
+NS_COOKIE=$(echo "$OUTPUT" | head -n $LINE_NUM | grep "\[test_activity_auditor1.so\] la_activity(ADD)" | tail -n 1 | grep -oE "cookie=0x[0-9a-f]+")
 
-if [ -z "$ADD_COOKIE" ]; then
-    echo "FAIL: Could not locate LA_ACT_ADD cookie for Auditor2."
+if [ -z "$NS_COOKIE" ]; then
+    echo "FAIL: Could not locate LA_ACT_ADD cookie for Auditor2's namespace."
     echo "$OUTPUT"
     exit 1
 fi
 
-if [ "$ADD_COOKIE" != "$DELETE_COOKIE" ]; then
-    # Fallback lookup in case ordering interleaved slightly
-    DELETE_COOKIE=$(echo "$OUTPUT" | grep "la_activity(DELETE) $ADD_COOKIE" | grep -oE "cookie=0x[0-9a-f]+" | tail -n 1)
-    if [ "$ADD_COOKIE" != "$DELETE_COOKIE" ]; then
-        echo "FAIL: Cookie mismatch! ADD: $ADD_COOKIE != DELETE: $DELETE_COOKIE"
-        exit 1
-    fi
+if ! echo "$OUTPUT" | grep -q "\[test_activity_auditor1.so\] la_activity(DELETE) cookie=$NS_COOKIE"; then
+    echo "FAIL: Auditor1 did not see LA_ACT_DELETE for Auditor2's namespace with matching cookie=$NS_COOKIE."
+    echo "$OUTPUT"
+    exit 1
+else
+    echo "PASS: Condition 2 (Stable namespace cookie for Auditor2 matching ADD and DELETE)."
 fi
-echo "PASS: Condition 2 (Stable la_activity cookie through lifecycle)."
 
 # Condition 3: First auditor sees la_objclose for 2nd auditor
-OBJCLOSE_TARGET_COOKIE=${ADD_COOKIE#cookie=}
-if ! echo "$OUTPUT" | grep -q "la_objclose() cookie=${OBJCLOSE_TARGET_COOKIE}"; then
-    echo "FAIL: Auditor1 did not see la_objclose for Auditor2's objects."
+AUD2_OBJ_COOKIE=$(echo "$OUTPUT" | grep "\[test_activity_auditor1.so\] la_objopen('test_activity_auditor2.so')" | grep -oE "cookie=0x[0-9a-f]+" | head -n 1)
+if ! echo "$OUTPUT" | grep -q "\[test_activity_auditor1.so\] la_objclose() $AUD2_OBJ_COOKIE"; then
+    echo "FAIL: Auditor1 did not see la_objclose for Auditor2's object ($AUD2_OBJ_COOKIE)."
     echo "$OUTPUT"
     exit 1
 else
-    echo "PASS: Condition 3 (la_objclose sibling interception)."
+    echo "PASS: Condition 3 (Auditor1 sees la_objclose for Auditor2)."
 fi
 
 echo "All Activity conditions passed."
