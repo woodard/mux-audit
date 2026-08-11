@@ -122,6 +122,9 @@ static std::mutex g_synth_cookie_mutex;
 static std::unordered_map<uintptr_t*, Lmid_t> g_cookie_to_lmid;
 static std::mutex g_cookie_lmid_mutex;
 
+// Structural offset calculated at runtime to robustly map uninitialized glibc cookies
+static size_t g_cookie_offset = 0;
+
 static void set_cookie_lmid(uintptr_t* cookie, Lmid_t lmid) {
     if (!cookie) return;
     std::lock_guard<std::mutex> lock(g_cookie_lmid_mutex);
@@ -146,9 +149,18 @@ static uintptr_t* get_synth_cookie(struct link_map* map) {
     return &g_synthesized_cookies[map];
 }
 
+// Structurally corrects uninitialized 0x0 cookies passed by glibc back to their link_map
+static struct link_map* get_lmap_from_cookie(uintptr_t* cookie) {
+    if (!cookie) return nullptr;
+    if (g_cookie_offset != 0) {
+        return reinterpret_cast<struct link_map*>(reinterpret_cast<char*>(cookie) - g_cookie_offset);
+    }
+    return la_cookie_to_link_map(cookie);
+}
+
 static uintptr_t* translate_cookie(uintptr_t* glibc_cookie) {
     if (!glibc_cookie) return nullptr;
-    struct link_map* lmap = la_cookie_to_link_map(glibc_cookie);
+    struct link_map* lmap = get_lmap_from_cookie(glibc_cookie);
     if (lmap) {
         std::lock_guard<std::mutex> lock(g_synth_cookie_mutex);
         auto it = g_synthesized_cookies.find(lmap);
@@ -386,6 +398,11 @@ char* la_objsearch(const char* name, uintptr_t* cookie, unsigned int flag) {
 
 // 3. Object Open
 unsigned int la_objopen(struct link_map* map, Lmid_t lmid, uintptr_t* cookie) {
+    // Capture structural offset to bypass glibc 0x0 initialization bugs during teardown
+    if (g_cookie_offset == 0 && map && cookie) {
+        g_cookie_offset = reinterpret_cast<char*>(cookie) - reinterpret_cast<char*>(map);
+    }
+
     am_register_map(map);
     set_cookie_lmid(cookie, lmid); 
     
