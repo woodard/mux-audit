@@ -1,9 +1,9 @@
-#include <stdio.h>
 #include <dlfcn.h>
+#include <stdio.h>
 
 int main() {
   printf("Calling dlopen(libgood.so)...\n");
-  void* h = dlopen("./libgood.so", RTLD_NOW);
+  void *h = dlopen("./libgood.so", RTLD_NOW);
   printf("Calling dlclose(libgood.so)...\n");
   dlclose(h);
   printf("Calling dlopen(libbad.so)...\n");

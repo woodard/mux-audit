@@ -1,3 +1,3 @@
 void lib_good() {
-    // Dummy function
+  // Dummy function
 }
