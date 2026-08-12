@@ -248,14 +248,14 @@ unsigned int la_version(unsigned int version) {
         final_sub_auditors.push_back(aud);
     }
     
-    // Fixed: Explicitly push our own multiplexer library so its dependencies 
+    // Explicitly push our own multiplexer library so its dependencies 
     // and internal TLS are appropriately counted in the requirement.
     final_sub_auditors.push_back(my_path);
 
     // Determine Required Static TLS and Verify Tunable
     size_t required_tls = calculate_ie_tls(final_sub_auditors, "/proc/self/exe");
     
-    // Fixed: Mirror glibc by adding a standard surplus reserve block to allow 
+    // Mirror glibc by adding a standard surplus reserve block to allow 
     // the application to gracefully dlopen plugins that rely on static TLS.
     if (required_tls > 0) {
         required_tls += 4096;
@@ -304,7 +304,7 @@ unsigned int la_version(unsigned int version) {
     // Re-exec if we are not in exclusive control or if TLS is undersized
     if (requires_reexec) {
         
-        // Fixed: Ensure the uncontrolled warning is only printed if uncontrolled 
+        // Ensure the uncontrolled warning is only printed if uncontrolled 
         // auditors actually triggered the re-execution, not just a TLS adjustment.
         if (uncontrolled_auditors) {
             fprintf(stderr, "[audit_multiplexer] WARNING: Uncontrolled auditors detected. Re-configuring environment and re-executing...\n");
@@ -365,6 +365,9 @@ unsigned int la_version(unsigned int version) {
     while (start != std::string::npos) {
         std::string lib = libs.substr(start, end - start);
         if (!lib.empty()) {
+            // Clear any stale error state
+            dlerror();
+            
             void* handle = dlmopen(LM_ID_NEWLM, lib.c_str(), RTLD_NOW | RTLD_LOCAL);
             if (handle) {
                 auto v_func = (unsigned int (*)(unsigned int))dlsym(handle, "la_version");
@@ -387,7 +390,14 @@ unsigned int la_version(unsigned int version) {
                     dlclose(handle);
                 }
             } else {
-                fprintf(stderr, "[audit_multiplexer] Warning: dlmopen failed for %s: %s\n", lib.c_str(), dlerror());
+                // Safely capture and output the exact dynamic linker failure string
+                const char* err = dlerror();
+                fprintf(stderr, "\n========================================================\n");
+                fprintf(stderr, "[audit_multiplexer] FATAL ERROR: dlmopen failed!\n");
+                fprintf(stderr, "Library: %s\n", lib.c_str());
+                fprintf(stderr, "Reason:  %s\n", err ? err : "Unknown (dlerror returned NULL)");
+                fprintf(stderr, "========================================================\n\n");
+                exit(EXIT_FAILURE);
             }
         }
         if (end == std::string::npos) break;
