@@ -358,6 +358,7 @@ unsigned int la_version(unsigned int version) {
 
     am_iterate_maps(am_register_map);
 
+    std::vector<std::string> audit2_libs;
     std::string libs(ld_audit2);
     size_t start = 0;
     size_t end = libs.find(':');
@@ -365,44 +366,59 @@ unsigned int la_version(unsigned int version) {
     while (start != std::string::npos) {
         std::string lib = libs.substr(start, end - start);
         if (!lib.empty()) {
-            // Clear any stale error state
-            dlerror();
-            
-            void* handle = dlmopen(LM_ID_NEWLM, lib.c_str(), RTLD_NOW | RTLD_LOCAL);
-            if (handle) {
-                auto v_func = (unsigned int (*)(unsigned int))dlsym(handle, "la_version");
-
-                if (v_func && v_func(LAV_CURRENT) == LAV_CURRENT) {
-                    auto aud = std::make_unique<Auditor>();
-                    aud->handle = handle;
-                    aud->version = v_func;
-                    aud->objsearch = (decltype(aud->objsearch))dlsym(handle, "la_objsearch");
-                    aud->objopen = (decltype(aud->objopen))dlsym(handle, "la_objopen");
-                    aud->preinit = (decltype(aud->preinit))dlsym(handle, "la_preinit");
-                    aud->activity = (decltype(aud->activity))dlsym(handle, "la_activity");
-                    aud->objclose = (decltype(aud->objclose))dlsym(handle, "la_objclose");
-                    aud->symbind64 = (decltype(aud->symbind64))dlsym(handle, "la_symbind64");
-                    aud->pltenter = (decltype(aud->pltenter))dlsym(handle, LA_PLTENTER_STR);
-                    aud->pltexit = (decltype(aud->pltexit))dlsym(handle, LA_PLTEXIT_STR);
-
-                    get_auditors().push_back(std::move(aud));
-                } else {
-                    dlclose(handle);
-                }
-            } else {
-                // Safely capture and output the exact dynamic linker failure string
-                const char* err = dlerror();
-                fprintf(stderr, "\n========================================================\n");
-                fprintf(stderr, "[audit_multiplexer] FATAL ERROR: dlmopen failed!\n");
-                fprintf(stderr, "Library: %s\n", lib.c_str());
-                fprintf(stderr, "Reason:  %s\n", err ? err : "Unknown (dlerror returned NULL)");
-                fprintf(stderr, "========================================================\n\n");
-                exit(EXIT_FAILURE);
-            }
+            audit2_libs.push_back(lib);
         }
         if (end == std::string::npos) break;
         start = end + 1;
         end = libs.find(':', start);
+    }
+
+    for (const auto& lib : audit2_libs) {
+        // Clear any stale error state
+        dlerror();
+        
+        void* handle = dlmopen(LM_ID_NEWLM, lib.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (handle) {
+            auto v_func = (unsigned int (*)(unsigned int))dlsym(handle, "la_version");
+
+            if (v_func && v_func(LAV_CURRENT) == LAV_CURRENT) {
+                auto aud = std::make_unique<Auditor>();
+                aud->handle = handle;
+                aud->version = v_func;
+                aud->objsearch = (decltype(aud->objsearch))dlsym(handle, "la_objsearch");
+                aud->objopen = (decltype(aud->objopen))dlsym(handle, "la_objopen");
+                aud->preinit = (decltype(aud->preinit))dlsym(handle, "la_preinit");
+                aud->activity = (decltype(aud->activity))dlsym(handle, "la_activity");
+                aud->objclose = (decltype(aud->objclose))dlsym(handle, "la_objclose");
+                aud->symbind64 = (decltype(aud->symbind64))dlsym(handle, "la_symbind64");
+                aud->pltenter = (decltype(aud->pltenter))dlsym(handle, LA_PLTENTER_STR);
+                aud->pltexit = (decltype(aud->pltexit))dlsym(handle, LA_PLTEXIT_STR);
+
+                get_auditors().push_back(std::move(aud));
+            } else {
+                dlclose(handle);
+            }
+        } else {
+            // Safely capture and output the exact dynamic linker failure string
+            const char* err = dlerror();
+            fprintf(stderr, "\n========================================================\n");
+            fprintf(stderr, "[audit_multiplexer] WARNING: dlmopen failed!\n");
+            fprintf(stderr, "Library: %s\n", lib.c_str());
+            fprintf(stderr, "Reason:  %s\n", err ? err : "Unknown (dlerror returned NULL)");
+            fprintf(stderr, "========================================================\n\n");
+            
+            if (audit2_libs.size() == 1) {
+                fprintf(stderr, "[audit_multiplexer] Single sub-auditor failed to load. Unsetting LD_AUDIT and re-executing...\n");
+                unsetenv("LD_AUDIT");
+                unsetenv("LD_AUDIT2");
+                unsetenv("AM_MUX_ACTIVE");
+                
+                std::vector<char*> args = get_cmdline_args();
+                execv("/proc/self/exe", args.data());
+                perror("execv failed");
+                exit(EXIT_FAILURE);
+            }
+        }
     }
     return LAV_CURRENT;
 }
