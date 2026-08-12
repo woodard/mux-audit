@@ -121,4 +121,7 @@ TESTS = \
     run_test_tls_injection.sh \
     run_test_tls_alignment.sh
 
+# Mark the alignment test as an expected failure until glibc is patched
+XFAIL_TESTS = run_test_tls_alignment.sh
+
 EXTRA_DIST = $(TESTS) README.md

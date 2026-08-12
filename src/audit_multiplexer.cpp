@@ -407,6 +407,8 @@ unsigned int la_version(unsigned int version) {
             fprintf(stderr, "Reason:  %s\n", err ? err : "Unknown (dlerror returned NULL)");
             fprintf(stderr, "========================================================\n\n");
             
+            // Fallback strategy: If this is the ONLY sub-auditor and it failed to load, 
+            // step out of the way entirely and let the application run natively.
             if (audit2_libs.size() == 1) {
                 fprintf(stderr, "[audit_multiplexer] Single sub-auditor failed to load. Unsetting LD_AUDIT and re-executing...\n");
                 unsetenv("LD_AUDIT");
