@@ -33,5 +33,20 @@ install-data-hook:
 uninstall-hook:
 	rm -f $(DESTDIR)$(man3dir)/am_get_destructors.3
 
-# Include the bundle script in the distribution tarball without installing it
-EXTRA_DIST = tools/bundle_project.py
+if HAVE_DOXYGEN
+doxygen: Doxyfile
+	$(DOXYGEN) $<
+else
+doxygen:
+	@echo "Doxygen is required to build API documentation but was not found."
+	@false
+endif
+
+.PHONY: doxygen
+
+# Generated documentation and the bundle script are not installed.
+CLEANFILES = Doxyfile
+clean-local:
+	rm -rf $(abs_builddir)/docs
+
+EXTRA_DIST = Doxyfile.in tools/bundle_project.py

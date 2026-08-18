@@ -36,6 +36,9 @@ make
 # 4. Install (typically requires root)
 sudo make install
 
+# 5. Generate the API reference (requires Doxygen)
+make doxygen
+
 ```
 
 ## Usage

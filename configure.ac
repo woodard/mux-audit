@@ -17,6 +17,10 @@ AM_PROG_AR
 # Initialize Libtool
 LT_INIT([shared disable-static dlopen])
 
+# Check for the optional API documentation generator
+AC_CHECK_PROG([DOXYGEN], [doxygen], [doxygen])
+AM_CONDITIONAL([HAVE_DOXYGEN], [test -n "$DOXYGEN"])
+
 # Check for version 2 debugger rendezvous protocol (glibc >= 2.35)
 AC_CHECK_TYPE([struct r_debug_extended],
               [AC_DEFINE([HAVE_STRUCT_R_DEBUG_EXTENDED], [1], [Define if struct r_debug_extended exists])],
@@ -31,6 +35,7 @@ AC_SUBST([LIBELF_LIBS])
 # Output Makefiles
 AC_CONFIG_FILES([
     Makefile
+    Doxyfile
     test/Makefile
 ])
 AC_OUTPUT
