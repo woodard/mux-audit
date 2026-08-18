@@ -5,7 +5,7 @@ echo "=== Running Static TLS Alignment Test ==="
 echo "=== Verifying glibc alignment compliance for auditors ==="
 echo "==========================================================="
 
-OUTPUT=$(LD_AUDIT="${MUX_SO}" LD_AUDIT2="${LIBS_DIR}/test_tls_align_auditor.so" ./test_tls_align_main 2>&1)
+OUTPUT=$(LD_AUDIT="${MUX_SO}" LD_AUDIT2="${LIBS_DIR}/test_tls_align_auditor.so" "${TEST_DIR}/test_tls_align_main" 2>&1)
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then

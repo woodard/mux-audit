@@ -4,11 +4,11 @@ echo "==========================================================="
 echo "=== Running DT_AUDIT Test ==="
 echo "==========================================================="
 
-# Assuming the DT_AUDIT compiled target is available in the build directory
-TARGET="./dt_audit_app"
+# The generated test environment supplies the configured build directory.
+TARGET="${TEST_DIR}/dt_audit_app"
 
 # Run the test executable and capture both stdout and stderr
-OUTPUT=$(LD_AUDIT="${MUX_SO}" LD_LIBRARY_PATH="./.libs:${LD_LIBRARY_PATH}" $TARGET 2>&1)
+OUTPUT=$(LD_AUDIT="${MUX_SO}" "${TARGET}" 2>&1)
 EXIT_CODE=$?
 
 # Verify that execution was successful

@@ -6,7 +6,7 @@ AM_TESTS_ENVIRONMENT = \
     LIBS_DIR='$(builddir)/.libs'; export LIBS_DIR; \
     MUX_SO='$(top_builddir)/.libs/audit_multiplexer.so'; export MUX_SO; \
     LD_BIND_NOW=1; export LD_BIND_NOW; \
-    LD_LIBRARY_PATH='$(builddir)/.libs:$(top_builddir)/.libs'; export LD_LIBRARY_PATH;
+    LD_LIBRARY_PATH='$(builddir)/.libs:$(top_builddir)/.libs'$${LD_LIBRARY_PATH:+":$$LD_LIBRARY_PATH"}; export LD_LIBRARY_PATH;
 
 check_PROGRAMS = dummy_main test4_main dt_audit_app test_activity_main test_tls_main test_tls_align_main
 check_LTLIBRARIES = \

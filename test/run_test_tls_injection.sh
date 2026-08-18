@@ -5,7 +5,7 @@ echo "=== Running Static TLS Injection Test ==="
 echo "=== Verifying GLIBC_TUNABLES sizing and injection ==="
 echo "==========================================================="
 
-OUTPUT=$(LD_AUDIT="${MUX_SO}" LD_AUDIT2="${LIBS_DIR}/test_tls_auditor.so" ./test_tls_main 2>&1)
+OUTPUT=$(LD_AUDIT="${MUX_SO}" LD_AUDIT2="${LIBS_DIR}/test_tls_auditor.so" "${TEST_DIR}/test_tls_main" 2>&1)
 EXIT_CODE=$?
 
 if [ $EXIT_CODE -ne 0 ]; then
