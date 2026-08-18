@@ -9,6 +9,12 @@ include_HEADERS = include/audit_multiplexer.h
 # Define the utility library AND the main audit module
 lib_LTLIBRARIES = libaudit_utils.la audit_multiplexer.la
 
+# Standalone utility for calculating the optional static TLS tunable
+bin_PROGRAMS = tls-calculator
+tls_calculator_SOURCES = tls-calculator.cpp src/tls_calculator.cpp
+tls_calculator_CPPFLAGS = -I$(top_srcdir)/src
+tls_calculator_LDADD = $(LIBELF_LIBS)
+
 # Setup the utility library
 libaudit_utils_la_SOURCES = src/audit_utils.cpp
 libaudit_utils_la_CPPFLAGS = -I$(top_srcdir)/include

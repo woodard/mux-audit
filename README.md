@@ -41,6 +41,22 @@ make doxygen
 
 ```
 
+### Standalone TLS Calculator
+
+The `tls-calculator` utility calculates the optional static TLS surplus for an
+application and any auditors that will be loaded at startup:
+
+```bash
+tls-calculator --audit /path/to/auditor.so --verbose /path/to/application
+```
+
+Pass `--audit` once for each auditor. The final output is a glibc tunable that
+can be placed in `GLIBC_TUNABLES`:
+
+```text
+glibc.rtld.optional_static_tls=45056
+```
+
 ## Usage
 
 To use the multiplexer, you must set `audit_multiplexer.so` as your primary auditor, and specify your desired chained auditors in the `LD_AUDIT2` environment variable, separated by colons.

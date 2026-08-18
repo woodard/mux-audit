@@ -172,13 +172,14 @@ static TlsInfo get_elf_tls_info(const std::string &filepath,
   return info;
 }
 
-size_t calculate_ie_tls(const std::vector<std::string> &audit_libs,
-                        const std::string &app_name) {
+TlsCalculationResult calculate_ie_tls_report(
+    const std::vector<std::string> &audit_libs, const std::string &app_name) {
   size_t dl_tls_static_size = 0;
   size_t dl_tls_static_align = 1;
   std::unordered_set<std::string> visited;
   std::vector<std::string> to_process = audit_libs;
   to_process.push_back(app_name);
+  TlsCalculationResult result = {0, 1, {}};
 
   while (!to_process.empty()) {
     std::string current_lib = to_process.back();
@@ -190,6 +191,8 @@ size_t calculate_ie_tls(const std::vector<std::string> &audit_libs,
 
     std::vector<std::string> dependencies;
     TlsInfo tls_info = get_elf_tls_info(current_lib, dependencies);
+    result.libraries.push_back(
+      {current_lib, tls_info.size, tls_info.align, tls_info.requires_ie});
 
     // Fixed: We must account for ALL libraries that have a PT_TLS segment (size
     // > 0), because glibc allocates static TLS for any object loaded during
@@ -209,5 +212,12 @@ size_t calculate_ie_tls(const std::vector<std::string> &audit_libs,
       }
     }
   }
-  return roundup(dl_tls_static_size, dl_tls_static_align);
+  result.required_tls = roundup(dl_tls_static_size, dl_tls_static_align);
+  result.maximum_alignment = dl_tls_static_align;
+  return result;
+}
+
+size_t calculate_ie_tls(const std::vector<std::string> &audit_libs,
+                        const std::string &app_name) {
+  return calculate_ie_tls_report(audit_libs, app_name).required_tls;
 }
